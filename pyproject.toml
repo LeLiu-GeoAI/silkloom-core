@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "silkloom-core"
+version = "0.1.0"
+description = "SilkLoom Core: lightweight, resilient batch pipeline for repeatable LLM and function workflows"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "openai>=1.40.0",
+  "pydantic>=2.0",
+  "tenacity>=8.2.0"
+]
+authors = [
+  { name = "SilkLoom Core Contributors" }
+]
+license = "MIT"
+keywords = ["llm", "pipeline", "workflow", "batch-processing", "silkloom"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2.1",
+  "twine>=5.1.1",
+]
+
+[tool.setuptools.packages.find]
+include = ["silkloom_core*"]
