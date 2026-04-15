@@ -44,7 +44,8 @@ def main() -> None:
             ),
             model="gpt-4o-mini",
             max_retries=3,
-        )
+        ),
+        depends_on=[],
     )
 
     pipeline.add_node(
@@ -52,7 +53,8 @@ def main() -> None:
             name="tag_theme",
             func=tag_research_theme,
             kwargs_mapping={"summary": "{summarize_note.text}"},
-        )
+        ),
+        depends_on=["summarize_note"],
     )
 
     inputs = [

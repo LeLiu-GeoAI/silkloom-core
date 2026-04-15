@@ -1,3 +1,3 @@
-from .core import BaseNode, FunctionNode, LLMNode, Pipeline
+from .core import BaseNode, CollectNode, FunctionNode, LLMNode, Pipeline
 
-__all__ = ["BaseNode", "FunctionNode", "LLMNode", "Pipeline"]
+__all__ = ["BaseNode", "CollectNode", "FunctionNode", "LLMNode", "Pipeline"]

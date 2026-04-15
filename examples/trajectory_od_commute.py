@@ -144,7 +144,8 @@ def main() -> None:
             response_model=CommuteOD,
             model="gpt-4o-mini",
             max_retries=3,
-        )
+        ),
+        depends_on=[],
     )
 
     pipeline.add_node(
@@ -163,7 +164,8 @@ def main() -> None:
                 "travel_minutes": "{extract_od.travel_minutes}",
                 "mode": "{extract_od.mode}",
             },
-        )
+        ),
+        depends_on=["extract_od"],
     )
 
     inputs = [

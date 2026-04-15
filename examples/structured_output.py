@@ -72,7 +72,8 @@ def main() -> None:
             ),
             response_model=GeoObservation,
             model="gpt-4o-mini",
-        )
+        ),
+        depends_on=[],
     )
 
     pipeline.add_node(
@@ -86,7 +87,8 @@ def main() -> None:
                 "latitude": "{extract_geo.latitude}",
                 "longitude": "{extract_geo.longitude}",
             },
-        )
+        ),
+        depends_on=["extract_geo"],
     )
 
     inputs = [

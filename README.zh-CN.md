@@ -11,9 +11,14 @@ SilkLoom Core 本质上是一个通用的批处理执行层，适合把同一流
 核心能力：
 
 - 节点化流程编排（`LLMNode`、`FunctionNode`、自定义 `BaseNode`）
+- 支持 `add_node(..., depends_on=[...])` 显式 DAG 分支与汇合
+- 支持 `add_collect_node(...)` 在同一 run 内做跨输入聚合
 - 并发执行
+- 内置 Python 编排能力，减少依赖并便于个人维护
 - 自动重试（指数退避）
 - SQLite 持久化与断点续跑（`run_id`）
+- 支持通过 `get_run_artifacts` 读取聚合产物
+- 内置 `tqdm` 进度条与阶段提示
 - 结构化输出（Pydantic）
 
 设计理念：
@@ -21,6 +26,7 @@ SilkLoom Core 本质上是一个通用的批处理执行层，适合把同一流
 - 重点是可重复执行，而不是智能调度
 - 工作流逻辑尽量显式、可控、可复现
 - 面向长批次任务的可恢复与可观测
+- 内部保持紧凑与显式，优先长期可读性
 
 ## 安装
 
@@ -60,7 +66,8 @@ pipeline.add_node(
         name="summarize",
         prompt_template="请用一句话总结: {input.text}",
         model="gpt-4o-mini",
-    )
+    ),
+    depends_on=[],
 )
 
 pipeline.add_node(
@@ -68,7 +75,8 @@ pipeline.add_node(
         name="score",
         func=score_text,
         kwargs_mapping={"text": "{summarize.text}"},
-    )
+    ),
+    depends_on=["summarize"],
 )
 
 run_id = pipeline.run([
@@ -181,6 +189,25 @@ python examples/trajectory_od_commute.py
 
 ## 核心概念
 
+### 0. 编排边界
+
+- SilkLoom Core 直接负责任务编排与并发调度
+- 对外 API 保持紧凑：节点 API、SQLite 持久化、run_id 续跑与导出接口
+- 默认本地运行，不依赖外部编排服务
+
+调用 `run()` 时，默认会在控制台打印工作流提示并显示 `tqdm` 进度条。
+
+- `show_workflow_prompt=False`：关闭工作流结构提示
+- `show_progress=False`：关闭进度条
+- `show_stage_prompt=False`：关闭阶段提示与收尾摘要
+- `progress_callback=callable`：订阅结构化运行事件
+
+`progress_callback(event)` 会收到字典事件：
+
+- `event="stage"`：阶段更新（`prepare`、`execute_nodes`、`collect`、`finalize`）
+- `event="task_settled"`：单任务完成更新，包含 `node`、`status`、`completed`、`total`
+- `event="run_finished"`：最终摘要，包含 `status`、`success`、`failed`、`elapsed_seconds`
+
 ### 1. Pipeline 模式
 
 - `depth_first`：按输入条目端到端推进
@@ -196,11 +223,49 @@ python examples/trajectory_od_commute.py
 - 失败自动重试（指数退避）
 - 使用同一个 `run_id` 可以续跑未完成任务
 
+### 4. DAG 分支与汇合
+
+- 通过 `add_node(node, depends_on=[...])` 显式声明依赖关系
+
+```python
+pipeline.add_node(FunctionNode(name="extract_od", func=extract_od), depends_on=[])
+pipeline.add_node(FunctionNode(name="estimate_time", func=estimate_time), depends_on=["extract_od"])
+pipeline.add_node(FunctionNode(name="estimate_cost", func=estimate_cost), depends_on=["extract_od"])
+pipeline.add_node(
+    FunctionNode(name="join_report", func=join_report),
+    depends_on=["estimate_time", "estimate_cost"],
+)
+```
+
+### 5. 跨输入 Collect/Reduce
+
+```python
+def merge_geojson(items, meta):
+    features = [item["value"]["feature"] for item in items if "feature" in item["value"]]
+    return {"type": "FeatureCollection", "features": features, "run_id": meta["run_id"]}
+
+pipeline.add_collect_node(
+    name="merge_geojson",
+    func=merge_geojson,
+    source_node="build_feature",
+)
+```
+
+读取聚合结果：
+
+```python
+artifacts = pipeline.get_run_artifacts(run_id)
+print(artifacts["merge_geojson"])
+```
+
 ## API 概览
 
-- `Pipeline.add_node(node) -> Pipeline`
-- `Pipeline.run(inputs, run_id=None) -> str`
+- `Pipeline.add_node(node, depends_on) -> Pipeline`
+- `Pipeline.add_collect_node(name, func, source_node=None, include_failed=False) -> Pipeline`
+- `Pipeline.run(inputs, run_id=None, show_workflow_prompt=True, show_progress=True, show_stage_prompt=True, progress_callback=None) -> str`
 - `Pipeline.export_results(run_id, format="json") -> list[dict]`
+- `Pipeline.get_run_artifacts(run_id) -> dict[str, dict]`
+- `Pipeline.describe_workflow() -> dict`
 
 ## 许可证
 

@@ -59,7 +59,8 @@ def main() -> None:
             func=preprocess_tile,
             kwargs_mapping={"tile_id": "{input.tile_id}", "ndvi": "{input.ndvi}"},
             max_retries=1,
-        )
+        ),
+        depends_on=[],
     )
     pipeline.add_node(
         FunctionNode(
@@ -67,7 +68,8 @@ def main() -> None:
             func=classify_vegetation,
             kwargs_mapping={"tile_id": "{preprocess.tile_id}", "ndvi": "{preprocess.ndvi}"},
             max_retries=1,
-        )
+        ),
+        depends_on=["preprocess"],
     )
 
     inputs = [
