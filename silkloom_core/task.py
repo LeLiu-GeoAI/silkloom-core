@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Generic, Optional, Protocol, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Generic, Optional, Protocol, TypeVar, overload
 
 import jinja2
-import pandas as pd
 from openai import OpenAI
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 from .results import ResultSet
 from .types import TaskResult
@@ -146,18 +148,18 @@ class LLMTask(Generic[TOutput]):
                         data=completion.choices[0].message.parsed,
                         usage=completion.usage.model_dump() if completion.usage else None,
                         input_data=item,
-                    )
+                    ) # pyright: ignore[reportReturnType]
                 # 纯文本模式
                 completion = self.client.chat.completions.create(
                     model=self.model,
-                    messages=messages,
+                    messages=messages, # type: ignore
                 )
                 return TaskResult(
                     is_success=True,
                     data=completion.choices[0].message.content,
                     usage=completion.usage.model_dump() if completion.usage else None,
                     input_data=item,
-                )
+                ) # pyright: ignore[reportReturnType]
             except Exception as e:
                 last_error = str(e)
 
@@ -186,7 +188,7 @@ class LLMTask(Generic[TOutput]):
     @overload
     def map(
         self,
-        sequence: pd.DataFrame,
+        sequence: "pd.DataFrame",
         db_path: str = ".silkloom_cache.db",
         run_id: Optional[str] = None,
         workers: int = 5,
@@ -209,7 +211,7 @@ class LLMTask(Generic[TOutput]):
         """
         
         # 1. 鸭子类型检测：统一转为 List[dict]
-        if isinstance(sequence, pd.DataFrame):
+        if hasattr(sequence, "to_dict") and hasattr(sequence, "columns"):
             inputs: list[PromptContext] = sequence.to_dict(orient="records") # Pandas DataFrame
         elif isinstance(sequence, (list, tuple)) and len(sequence) > 0 and isinstance(sequence[0], str):
             inputs = [{"text": item} for item in sequence] # 纯字符串列表

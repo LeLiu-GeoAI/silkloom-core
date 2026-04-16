@@ -3,14 +3,6 @@
 [中文](README.zh-CN.md) | [English](README.md)
 
 SilkLoom Core V1.0.0 是一个极简、带状态持久化的大模型批处理引擎。
-对外只暴露三件套：
-
-# SilkLoom Core
-
-[中文](README.zh-CN.md) | [English](README.md)
-
-SilkLoom Core V1.0.0 是一个极简、带状态持久化的大模型批处理引擎。
-
 对外暴露的公共 API 很小：
 
 - LLMTask
@@ -65,7 +57,9 @@ LLMTask.map() 支持三种常见输入：
 
 - list[str]：每个字符串会自动包装成 `{"text": ...}`
 - list[dict]：每个字典会作为一条输入上下文
-- pandas.DataFrame：每一行会作为一条输入上下文，列名会直接成为模板变量
+- pandas.DataFrame：可选，每一行会作为一条输入上下文，列名会直接成为模板变量
+
+如果你要传 DataFrame，需要单独安装 pandas。普通用法不需要它。
 
 字典列表示例：
 

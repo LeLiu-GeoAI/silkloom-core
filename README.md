@@ -58,7 +58,9 @@ LLMTask.map() accepts three common input shapes:
 
 - list[str]: each string is wrapped as `{"text": ...}`
 - list[dict]: each dict becomes one prompt context
-- pandas.DataFrame: each row becomes one prompt context and the column names become template variables
+- pandas.DataFrame: optional; each row becomes one prompt context and the column names become template variables
+
+If you want to pass a DataFrame, install pandas separately. It is not required for normal usage.
 
 Dictionary list example:
 
