@@ -1,9 +1,9 @@
 name: SilkLoom Core
-about: Lightweight, resilient LLM batch processing pipeline
+about: Minimal stateful LLM/VLM batch engine
 topics:
   - python
   - llm
-  - pipeline
+  - vlm
   - workflow
   - batch-processing
   - openai
@@ -42,13 +42,13 @@ Tests will run automatically on PR via GitHub Actions. You can also run locally:
 ```bash
 python -m pytest
 # or just check imports
-python -c "from silkloom_core import Pipeline; print('✓')"
+python -c "from silkloom_core import LLMTask, ResultSet, TaskResult; print('✓')"
 ```
 
 ## Release Process
 
-1. Tag commit with semantic version: `git tag v0.2.0`
-2. Push tag: `git push origin v0.2.0`
+1. Tag commit with semantic version: `git tag v1.0.0`
+2. Push tag: `git push origin v1.0.0`
 3. GitHub Actions builds and uploads to PyPI automatically
 4. GitHub Release created with artifacts
 

@@ -2,31 +2,27 @@
 
 [中文](README.zh-CN.md) | [English](README.md)
 
-SilkLoom Core 是一个轻量、可恢复的工作流执行工具，适用于可重复执行的 LLM 与函数流水线。
+SilkLoom Core V1.0.0 是一个极简、带状态持久化的大模型批处理引擎。
+对外只暴露三件套：
 
-## 简介
+# SilkLoom Core
 
-SilkLoom Core 本质上是一个通用的批处理执行层，适合把同一流程反复跑在大量输入上，并保证失败可重试、任务可续跑。
+[中文](README.zh-CN.md) | [English](README.md)
 
-核心能力：
+SilkLoom Core V1.0.0 是一个极简、带状态持久化的大模型批处理引擎。
 
-- 节点化流程编排（`LLMNode`、`FunctionNode`、自定义 `BaseNode`）
-- 支持 `add_node(..., depends_on=[...])` 显式 DAG 分支与汇合
-- 支持 `add_collect_node(...)` 在同一 run 内做跨输入聚合
-- 并发执行
-- 内置 Python 编排能力，减少依赖并便于个人维护
-- 自动重试（指数退避）
-- SQLite 持久化与断点续跑（`run_id`）
-- 支持通过 `get_run_artifacts` 读取聚合产物
-- 内置 `tqdm` 进度条与阶段提示
-- 结构化输出（Pydantic）
+对外暴露的公共 API 很小：
 
-设计理念：
+- LLMTask
+- ResultSet
+- TaskResult
 
-- 重点是可重复执行，而不是智能调度
-- 工作流逻辑尽量显式、可控、可复现
-- 面向长批次任务的可恢复与可观测
-- 内部保持紧凑与显式，优先长期可读性
+本文档分成两部分：
+
+1. 用户指南：安装、输入类型、提示词规则和示例。
+2. API 文档：构造参数、方法签名和返回对象。
+
+提示词模板使用严格的 Jinja2 语法。`user_prompt` 和 `system_prompt` 会针对每条输入数据渲染，模板里的变量名必须与该条输入字典的键一致。缺失变量会直接报错，不会静默渲染为空字符串。对于纯字符串列表，SilkLoom 会自动包装成 `{"text": "..."}`。
 
 ## 安装
 
@@ -37,235 +33,280 @@ pip install silkloom-core
 源码安装：
 
 ```bash
-git clone https://github.com/your-org/silkloom-core.git
+git clone https://github.com/LeLiu-GeoAI/silkloom-core.git
 cd silkloom-core
 pip install -e .
 ```
 
-开发依赖：
+## 用户指南
 
-```bash
-pip install -e ".[dev]"
-```
-
-## 快速开始
+### 快速开始
 
 ```python
-from silkloom_core import Pipeline, LLMNode, FunctionNode
+from openai import OpenAI
+from silkloom_core import LLMTask
 
+client = OpenAI(api_key="your_key")
 
-def score_text(text: str) -> dict:
-    score = min(len(text) / 100, 1.0)
-    return {"score": round(score, 3)}
-
-
-pipeline = Pipeline(db_path="pipeline.db", execution_mode="depth_first", default_workers=4)
-
-pipeline.add_node(
-    LLMNode(
-        name="summarize",
-        prompt_template="请用一句话总结: {input.text}",
-        model="gpt-4o-mini",
-    ),
-    depends_on=[],
+task = LLMTask(
+    model="gpt-4o-mini",
+    user_prompt="请翻译成英文：{{ text }}",
+    client=client,
 )
 
-pipeline.add_node(
-    FunctionNode(
-        name="score",
-        func=score_text,
-        kwargs_mapping={"text": "{summarize.text}"},
-    ),
-    depends_on=["summarize"],
+results = task.map(["你好", "今天天气不错"])
+print(results[0])
+print(results.success_count, results.failed_count)
+```
+
+### 输入类型
+
+LLMTask.map() 支持三种常见输入：
+
+- list[str]：每个字符串会自动包装成 `{"text": ...}`
+- list[dict]：每个字典会作为一条输入上下文
+- pandas.DataFrame：每一行会作为一条输入上下文，列名会直接成为模板变量
+
+字典列表示例：
+
+```python
+from silkloom_core import LLMTask
+
+task = LLMTask(
+    model="gpt-4o-mini",
+    user_prompt="从文本中提取姓名和意图：{{ text }}",
 )
 
-run_id = pipeline.run([
-    {"text": "SilkLoom Core 可做科研文本的批处理。"},
-    {"text": "它支持 SQLite 持久化和 run_id 续跑。"},
+results = task.map([
+    {"text": "我叫 Alice，我想退款"},
+    {"text": "Bob 在咨询物流"},
+])
+```
+
+### Pandas DataFrame
+
+DataFrame 的每一行会被当作一条输入数据，列名会直接成为模板变量。
+
+```python
+import pandas as pd
+from silkloom_core import LLMTask
+
+df = pd.DataFrame(
+    [
+        {"text": "城市热岛正在加剧。", "lang": "zh"},
+        {"text": "Urban renewal should balance efficiency and equity.", "lang": "en"},
+    ]
+)
+
+task = LLMTask(
+    model="gpt-4o-mini",
+    user_prompt="请改写以下 {{ lang }} 文本：{{ text }}",
+)
+
+results = task.map(df)
+```
+
+### 提示词模板规则
+
+模板里的变量名必须和输入上下文中的键一致。
+
+```python
+task = LLMTask(
+    model="gpt-4o-mini",
+    user_prompt="请改写以下 {{ lang }} 文本：{{ text }}",
+)
+```
+
+如果输入是 DataFrame 的一行，下面这些列名就会直接暴露给模板：
+
+```python
+{"text": "城市热岛正在加剧。", "lang": "zh"}
+```
+
+### 结构化输出
+
+```python
+from pydantic import BaseModel
+from silkloom_core import LLMTask
+
+
+class ExtractInfo(BaseModel):
+    name: str
+    intent: str
+
+
+task = LLMTask(
+    model="gpt-4o-mini",
+    user_prompt="从文本中提取姓名和意图：{{ text }}",
+    response_model=ExtractInfo,
+)
+
+results = task.map([
+    {"text": "我叫 Alice，我想退款"},
+    {"text": "Bob 在咨询物流"},
 ])
 
-print(pipeline.export_results(run_id))
+print(results[0].name)
 ```
 
-## OpenAI 兼容接口示例
+### 其他模型（GLM / Ollama）
 
-`LLMNode` 支持注入自定义 OpenAI 客户端：
-
-```python
-LLMNode(..., client=your_openai_client)
-```
-
-只要服务兼容 OpenAI Chat Completions，就可以接入。
-
-### 1) 官方 OpenAI
-
-```python
-from silkloom_core import LLMNode
-
-node = LLMNode(
-    name="extract",
-    prompt_template="提取关键信息: {input.note}",
-    model="gpt-4o-mini",
-)
-```
-
-```bash
-export OPENAI_API_KEY="your_openai_key"
-# PowerShell:
-# $env:OPENAI_API_KEY="your_openai_key"
-```
-
-### 2) GLM-4-Flash（OpenAI 兼容）
+#### GLM-4-Flash
 
 ```python
 import os
 from openai import OpenAI
-from silkloom_core import LLMNode
+from silkloom_core import LLMTask
 
 glm_client = OpenAI(
     api_key=os.environ["ZHIPUAI_API_KEY"],
     base_url="https://open.bigmodel.cn/api/paas/v4/",
 )
 
-node = LLMNode(
-    name="extract_geo",
-    prompt_template="从文本中提取城市、主题和坐标: {input.note}",
+task = LLMTask(
     model="glm-4-flash",
+    user_prompt="请总结这段文本：{{ text }}",
     client=glm_client,
 )
+
+results = task.map(["城市更新要兼顾效率和公平。"])
 ```
 
-```bash
-export ZHIPUAI_API_KEY="your_glm_key"
-# PowerShell:
-# $env:ZHIPUAI_API_KEY="your_glm_key"
-```
-
-### 3) 本地 Ollama（OpenAI 兼容）
-
-先启动 Ollama 并拉取模型（示例）：
-
-```bash
-ollama pull qwen2.5:7b
-ollama serve
-```
-
-在 SilkLoom Core 中接入：
+#### Ollama（本地）
 
 ```python
 from openai import OpenAI
-from silkloom_core import LLMNode
+from silkloom_core import LLMTask
 
 ollama_client = OpenAI(
     api_key="ollama",
     base_url="http://localhost:11434/v1",
 )
 
-node = LLMNode(
-    name="local_summary",
-    prompt_template="总结以下调研文本: {input.note}",
+task = LLMTask(
     model="qwen2.5:7b",
+    user_prompt="请将这句话改写为学术表达：{{ text }}",
     client=ollama_client,
 )
+
+results = task.map(["晚高峰交通拥堵最明显。"])
 ```
 
-说明：本地模型结构化输出能力存在差异。若使用 `response_model`，建议在提示词中明确“仅输出 JSON 对象”。
+### 多模态输入
 
-## 示例脚本
-
-仓库里的示例当前以 GIS/城市研究为案例，但 SilkLoom Core 本身不限定领域，可替换为任意业务场景。
-
-```bash
-python examples/quickstart.py
-python examples/structured_output.py
-python examples/resume_with_run_id.py
-python examples/trajectory_od_commute.py
-```
-
-- quickstart.py：总结笔记并打主题标签
-- structured_output.py：抽取结构化属性并生成 GeoJSON-like 要素
-- resume_with_run_id.py：模拟可重复瓦片处理与续跑
-- trajectory_od_commute.py：OD 抽取 + 距离/时间分段 + 流线输出
-
-## 核心概念
-
-### 0. 编排边界
-
-- SilkLoom Core 直接负责任务编排与并发调度
-- 对外 API 保持紧凑：节点 API、SQLite 持久化、run_id 续跑与导出接口
-- 默认本地运行，不依赖外部编排服务
-
-调用 `run()` 时，默认会在控制台打印工作流提示并显示 `tqdm` 进度条。
-
-- `show_workflow_prompt=False`：关闭工作流结构提示
-- `show_progress=False`：关闭进度条
-- `show_stage_prompt=False`：关闭阶段提示与收尾摘要
-- `progress_callback=callable`：订阅结构化运行事件
-
-`progress_callback(event)` 会收到字典事件：
-
-- `event="stage"`：阶段更新（`prepare`、`execute_nodes`、`collect`、`finalize`）
-- `event="task_settled"`：单任务完成更新，包含 `node`、`status`、`completed`、`total`
-- `event="run_finished"`：最终摘要，包含 `status`、`success`、`failed`、`elapsed_seconds`
-
-### 1. Pipeline 模式
-
-- `depth_first`：按输入条目端到端推进
-- `breadth_first`：按节点分批推进
-
-### 2. 上下文流转
-
-- 初始上下文：`{"input": ...}`
-- 每个节点成功后写入：`context[node_name] = output_dict`
-
-### 3. 重试与恢复
-
-- 失败自动重试（指数退避）
-- 使用同一个 `run_id` 可以续跑未完成任务
-
-### 4. DAG 分支与汇合
-
-- 通过 `add_node(node, depends_on=[...])` 显式声明依赖关系
+在输入中使用 `images` 字段（支持本地路径、URL、base64/data URI）：
 
 ```python
-pipeline.add_node(FunctionNode(name="extract_od", func=extract_od), depends_on=[])
-pipeline.add_node(FunctionNode(name="estimate_time", func=estimate_time), depends_on=["extract_od"])
-pipeline.add_node(FunctionNode(name="estimate_cost", func=estimate_cost), depends_on=["extract_od"])
-pipeline.add_node(
-    FunctionNode(name="join_report", func=join_report),
-    depends_on=["estimate_time", "estimate_cost"],
+from silkloom_core import LLMTask
+
+task = LLMTask(
+    model="gpt-4o",
+    user_prompt="请分析图片并回答：{{ text }}",
+)
+
+results = task.map([
+    {
+        "text": "图里主要内容是什么？",
+        "images": ["./pic1.jpg", "https://example.com/pic2.png"],
+    }
+])
+```
+
+### 断点续跑
+
+`map` 通过 `db_path` + `run_id` 提供 SQLite 级别断点续跑：
+
+```python
+results = task.map(
+    [{"text": "a"}, {"text": "b"}],
+    db_path="my_run.db",
+    run_id="demo_001",
+    workers=5,
 )
 ```
 
-### 5. 跨输入 Collect/Reduce
+再次用同一个 `run_id` 运行时，会复用已成功结果。
+
+### 结果导出
+
+`ResultSet` 既可以直接索引，也可以导出文件：
 
 ```python
-def merge_geojson(items, meta):
-    features = [item["value"]["feature"] for item in items if "feature" in item["value"]]
-    return {"type": "FeatureCollection", "features": features, "run_id": meta["run_id"]}
+results.run_id
+results.success_count
+results.failed_count
+results.total_tokens
+results.errors
+results[0]
+results.export_jsonl("out.jsonl")
+results.export_csv("out.csv", flatten=True)
+```
 
-pipeline.add_collect_node(
-    name="merge_geojson",
-    func=merge_geojson,
-    source_node="build_feature",
+## API 文档
+
+### LLMTask
+
+构造函数：
+
+```python
+LLMTask(
+    model: str,
+    user_prompt: str,
+    system_prompt: str | None = None,
+    response_model: type[BaseModel] | None = None,
+    max_retries: int = 3,
+    client: Any | None = None,
 )
 ```
 
-读取聚合结果：
+参数说明：
+
+- model：目标模型名，例如 `gpt-4o-mini`
+- user_prompt：必填的用户提示词模板，使用 Jinja2 语法
+- system_prompt：可选的系统提示词模板，使用 Jinja2 语法
+- response_model：可选的 Pydantic 模型，用于结构化输出解析
+- max_retries：单条输入的最大重试次数
+- client：可选的 OpenAI 兼容客户端；不传则使用官方客户端
+
+方法：
 
 ```python
-artifacts = pipeline.get_run_artifacts(run_id)
-print(artifacts["merge_geojson"])
+map(sequence, db_path=".silkloom_cache.db", run_id=None, workers=5) -> ResultSet
 ```
 
-## API 概览
+支持的输入类型：
 
-- `Pipeline.add_node(node, depends_on) -> Pipeline`
-- `Pipeline.add_collect_node(name, func, source_node=None, include_failed=False) -> Pipeline`
-- `Pipeline.run(inputs, run_id=None, show_workflow_prompt=True, show_progress=True, show_stage_prompt=True, progress_callback=None) -> str`
-- `Pipeline.export_results(run_id, format="json") -> list[dict]`
-- `Pipeline.get_run_artifacts(run_id) -> dict[str, dict]`
-- `Pipeline.describe_workflow() -> dict`
+- list[str]
+- list[dict]
+- pandas.DataFrame
+
+### ResultSet
+
+`ResultSet` 的顺序与输入顺序严格对齐。
+
+属性：
+
+- run_id
+- success_count
+- failed_count
+- total_tokens
+- errors
+
+方法：
+
+- `results[0]`：返回和输入同索引的结果
+- `export_jsonl(path)`：导出成功结果到 JSONL
+- `export_csv(path, flatten=False, include_usage=True)`：导出 CSV
+
+### TaskResult
+
+每条底层任务结果包含：
+
+- is_success
+- data
+- error
+- usage
+- input_data
 
 ## 许可证
 

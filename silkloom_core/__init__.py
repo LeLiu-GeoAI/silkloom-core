@@ -1,3 +1,16 @@
-from .core import BaseNode, CollectNode, FunctionNode, LLMNode, Pipeline
+from __future__ import annotations
 
-__all__ = ["BaseNode", "CollectNode", "FunctionNode", "LLMNode", "Pipeline"]
+"""
+SilkLoom Core V4.1
+极简、带状态持久化的大模型批处理引擎。
+"""
+
+from .task import LLMTask
+from .results import ResultSet
+from .types import TaskResult
+
+__all__ = [
+	"LLMTask",
+	"ResultSet",
+	"TaskResult",
+]

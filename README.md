@@ -2,268 +2,304 @@
 
 [中文](README.zh-CN.md) | [English](README.md)
 
-SilkLoom Core is a lightweight, resilient batch pipeline for repeatable workflows. It is a general-purpose execution layer for running the same process over many inputs, with retries and resumability built in.
+SilkLoom Core V1.0.0 is a minimal, stateful LLM batch engine.
 
-## Overview
+The public surface is intentionally small:
 
-Key capabilities:
+- LLMTask
+- ResultSet
+- TaskResult
 
-- Node-based workflow composition (`LLMNode`, `FunctionNode`, custom `BaseNode`)
-- DAG dependencies via `add_node(..., depends_on=[...])` for fan-out/fan-in workflows
-- Cross-input aggregation via `add_collect_node(...)` to reduce item outputs inside one run
-- Concurrent execution
-- Built-in Python orchestration with minimal dependency surface
-- Retry with exponential backoff
-- SQLite persistence and resumability with `run_id`
-- Aggregated artifact retrieval via `get_run_artifacts`
-- Built-in `tqdm` progress bar with stage prompts
-- Structured output with Pydantic
+This README is split into two parts:
 
-Design philosophy:
+1. User Guide: installation, input formats, prompt rules, and examples.
+2. API Reference: constructor arguments, method signatures, and returned objects.
 
-- Focus on repeatable execution, not intelligent scheduling
-- Keep workflow logic explicit and deterministic
-- Make long-running batch jobs restartable and observable
-- Keep internals compact and explicit for long-term maintainability
+Prompt templates use strict Jinja2 syntax. `user_prompt` and `system_prompt` render against each input item, so template variables must match the keys in that item's dictionary. Missing variables raise an error instead of rendering as empty text. For a plain string list, SilkLoom wraps each item as `{"text": "..."}`.
 
-## Installation
+## Install
 
 ```bash
 pip install silkloom-core
 ```
 
-Install from source:
+From source:
 
 ```bash
-git clone https://github.com/your-org/silkloom-core.git
+git clone https://github.com/LeLiu-GeoAI/silkloom-core.git
 cd silkloom-core
 pip install -e .
 ```
 
-Dev extras:
+## User Guide
 
-```bash
-pip install -e ".[dev]"
-```
-
-## Quick Start
+### Quick Start
 
 ```python
-from silkloom_core import Pipeline, LLMNode, FunctionNode
+from openai import OpenAI
+from silkloom_core import LLMTask
 
+client = OpenAI(api_key="your_key")
 
-def score_text(text: str) -> dict:
-    score = min(len(text) / 100, 1.0)
-    return {"score": round(score, 3)}
-
-
-pipeline = Pipeline(db_path="pipeline.db", execution_mode="depth_first", default_workers=4)
-
-pipeline.add_node(
-    LLMNode(
-        name="summarize",
-        prompt_template="Summarize in one sentence: {input.text}",
-        model="gpt-4o-mini",
-    ),
-    depends_on=[],
+task = LLMTask(
+    model="gpt-4o-mini",
+    user_prompt="Translate into English: {{ text }}",
+    client=client,
 )
 
-pipeline.add_node(
-    FunctionNode(
-        name="score",
-        func=score_text,
-        kwargs_mapping={"text": "{summarize.text}"},
-    ),
-    depends_on=["summarize"],
+results = task.map(["你好", "今天天气不错"])
+print(results[0])
+print(results.success_count, results.failed_count)
+```
+
+### Input Formats
+
+LLMTask.map() accepts three common input shapes:
+
+- list[str]: each string is wrapped as `{"text": ...}`
+- list[dict]: each dict becomes one prompt context
+- pandas.DataFrame: each row becomes one prompt context and the column names become template variables
+
+Dictionary list example:
+
+```python
+from silkloom_core import LLMTask
+
+task = LLMTask(
+    model="gpt-4o-mini",
+    user_prompt="Extract name and intent from text: {{ text }}",
 )
 
-run_id = pipeline.run([
-    {"text": "SilkLoom Core supports repeatable LLM batch processing."},
-    {"text": "It persists progress in SQLite and can resume by run_id."},
+results = task.map([
+    {"text": "My name is Alice. I want a refund."},
+    {"text": "Bob asks about delivery."},
+])
+```
+
+### Pandas DataFrame
+
+Each DataFrame row is treated as one input item, and the column names are available as template variables.
+
+```python
+import pandas as pd
+from silkloom_core import LLMTask
+
+df = pd.DataFrame(
+    [
+        {"text": "Urban heat island is intensifying.", "lang": "en"},
+        {"text": "城市更新需要兼顾公平。", "lang": "zh"},
+    ]
+)
+
+task = LLMTask(
+    model="gpt-4o-mini",
+    user_prompt="Rewrite the following {{ lang }} text: {{ text }}",
+)
+
+results = task.map(df)
+```
+
+### Prompt Template Rules
+
+Template variables must match the keys in the input context.
+
+```python
+task = LLMTask(
+    model="gpt-4o-mini",
+    user_prompt="Rewrite the following {{ lang }} text: {{ text }}",
+)
+```
+
+For a DataFrame, this row exposes `text` and `lang` to the template:
+
+```python
+{"text": "Urban heat is rising.", "lang": "en"}
+```
+
+### Structured Output
+
+```python
+from pydantic import BaseModel
+from silkloom_core import LLMTask
+
+
+class ExtractInfo(BaseModel):
+    name: str
+    intent: str
+
+
+task = LLMTask(
+    model="gpt-4o-mini",
+    user_prompt="Extract name and intent from text: {{ text }}",
+    response_model=ExtractInfo,
+)
+
+results = task.map([
+    {"text": "My name is Alice. I want a refund."},
+    {"text": "Bob asks about delivery."},
 ])
 
-print(pipeline.export_results(run_id))
+print(results[0].name)
 ```
 
-## OpenAI-Compatible Endpoints
+### GLM and Ollama
 
-`LLMNode` supports custom OpenAI clients via:
-
-```python
-LLMNode(..., client=your_openai_client)
-```
-
-So any endpoint compatible with OpenAI Chat Completions can be used.
-
-### 1) Official OpenAI
-
-```python
-from silkloom_core import LLMNode
-
-node = LLMNode(
-    name="extract",
-    prompt_template="Extract key facts: {input.note}",
-    model="gpt-4o-mini",
-)
-```
-
-```bash
-export OPENAI_API_KEY="your_openai_key"
-# PowerShell:
-# $env:OPENAI_API_KEY="your_openai_key"
-```
-
-### 2) GLM-4-Flash (OpenAI-compatible)
+#### GLM-4-Flash
 
 ```python
 import os
 from openai import OpenAI
-from silkloom_core import LLMNode
+from silkloom_core import LLMTask
 
 glm_client = OpenAI(
     api_key=os.environ["ZHIPUAI_API_KEY"],
     base_url="https://open.bigmodel.cn/api/paas/v4/",
 )
 
-node = LLMNode(
-    name="extract_geo",
-    prompt_template="Extract city, topic, and coordinates: {input.note}",
+task = LLMTask(
     model="glm-4-flash",
+    user_prompt="Summarize this text: {{ text }}",
     client=glm_client,
 )
+
+results = task.map(["Urban renewal should balance efficiency and equity."])
 ```
 
-```bash
-export ZHIPUAI_API_KEY="your_glm_key"
-# PowerShell:
-# $env:ZHIPUAI_API_KEY="your_glm_key"
-```
-
-### 3) Local Ollama (OpenAI-compatible)
-
-Start Ollama and pull a model (example):
-
-```bash
-ollama pull qwen2.5:7b
-ollama serve
-```
-
-Use it in SilkLoom Core:
+#### Ollama
 
 ```python
 from openai import OpenAI
-from silkloom_core import LLMNode
+from silkloom_core import LLMTask
 
 ollama_client = OpenAI(
     api_key="ollama",
     base_url="http://localhost:11434/v1",
 )
 
-node = LLMNode(
-    name="local_summary",
-    prompt_template="Summarize this note: {input.note}",
+task = LLMTask(
     model="qwen2.5:7b",
+    user_prompt="Rewrite in academic tone: {{ text }}",
     client=ollama_client,
 )
+
+results = task.map(["Traffic is usually worst in evening peak."])
 ```
 
-Note: local models vary in structured-output quality. If you use `response_model`, explicitly require strict JSON-only output in the prompt.
+### Multimodal Input
 
-## Example Scripts
-
-The provided examples use GIS/urban research as one domain case, but SilkLoom Core itself is domain-agnostic.
-
-```bash
-python examples/quickstart.py
-python examples/structured_output.py
-python examples/resume_with_run_id.py
-python examples/trajectory_od_commute.py
-```
-
-- quickstart.py: summarize notes and tag themes
-- structured_output.py: extract structured attributes and build GeoJSON-like features
-- resume_with_run_id.py: simulate repeatable tile processing with resume
-- trajectory_od_commute.py: OD extraction + distance/time segmentation + flowline output
-
-## Core Concepts
-
-### 0. Orchestration Boundary
-
-- SilkLoom Core handles task orchestration and concurrency scheduling directly
-- The public API stays compact: node API, SQLite persistence, run_id resume, and export interfaces
-- Everything runs locally without external orchestrator services
-
-When you call `run()`, it prints a short workflow prompt and a `tqdm` progress bar by default.
-
-- `show_workflow_prompt=False`: disable workflow structure prompt
-- `show_progress=False`: disable progress bar
-- `show_stage_prompt=False`: disable stage and final summary messages
-- `progress_callback=callable`: subscribe to structured runtime events
-
-`progress_callback(event)` receives dictionaries with:
-
-- `event="stage"`: run stage updates (`prepare`, `execute_nodes`, `collect`, `finalize`)
-- `event="task_settled"`: per-task completion updates with `node`, `status`, `completed`, `total`
-- `event="run_finished"`: final summary with `status`, `success`, `failed`, `elapsed_seconds`
-
-### 1. Pipeline Modes
-
-- `depth_first`: per-item end-to-end progression
-- `breadth_first`: stage-by-stage progression across items
-
-### 2. Context Flow
-
-- Initial context: `{"input": ...}`
-- Node output storage: `context[node_name] = output_dict`
-
-### 3. Retry and Resume
-
-- Automatic retries with exponential backoff
-- Resume unfinished tasks by reusing the same `run_id`
-
-### 4. DAG Branching and Joining
-
-- Use `add_node(node, depends_on=[...])` to declare dependencies explicitly
+Pass image sources in `images` (supports local path, URL, or base64/data URI):
 
 ```python
-pipeline.add_node(FunctionNode(name="extract_od", func=extract_od), depends_on=[])
-pipeline.add_node(FunctionNode(name="estimate_time", func=estimate_time), depends_on=["extract_od"])
-pipeline.add_node(FunctionNode(name="estimate_cost", func=estimate_cost), depends_on=["extract_od"])
-pipeline.add_node(
-    FunctionNode(name="join_report", func=join_report),
-    depends_on=["estimate_time", "estimate_cost"],
+from silkloom_core import LLMTask
+
+task = LLMTask(
+    model="gpt-4o",
+    user_prompt="Describe these images and answer: {{ text }}",
+)
+
+results = task.map([
+    {
+        "text": "What is shown?",
+        "images": ["./pic1.jpg", "https://example.com/pic2.png"],
+    }
+])
+```
+
+### Resumability
+
+`map` supports resumability with SQLite via `db_path` + `run_id`:
+
+```python
+results = task.map(
+    [{"text": "a"}, {"text": "b"}],
+    db_path="my_run.db",
+    run_id="demo_001",
+    workers=5,
 )
 ```
 
-### 5. Cross-Input Collect/Reduce
+Running again with the same `run_id` reuses successful records.
+
+### Exporting Results
+
+`ResultSet` supports in-memory access and file export:
 
 ```python
-def merge_geojson(items, meta):
-    features = [item["value"]["feature"] for item in items if "feature" in item["value"]]
-    return {"type": "FeatureCollection", "features": features, "run_id": meta["run_id"]}
+results.run_id
+results.success_count
+results.failed_count
+results.total_tokens
+results.errors
+results[0]
+results.export_jsonl("out.jsonl")
+results.export_csv("out.csv", flatten=True)
+```
 
-pipeline.add_collect_node(
-    name="merge_geojson",
-    func=merge_geojson,
-    source_node="build_feature",
+## API Reference
+
+### LLMTask
+
+Constructor:
+
+```python
+LLMTask(
+    model: str,
+    user_prompt: str,
+    system_prompt: str | None = None,
+    response_model: type[BaseModel] | None = None,
+    max_retries: int = 3,
+    client: Any | None = None,
 )
 ```
 
-Retrieve collect outputs:
+Arguments:
+
+- model: target model name, such as `gpt-4o-mini`
+- user_prompt: required Jinja2 template for the user message
+- system_prompt: optional Jinja2 template for the system message
+- response_model: optional Pydantic model for structured output parsing
+- max_retries: number of attempts for one item
+- client: optional OpenAI-compatible client; defaults to the official client
+
+Method:
 
 ```python
-artifacts = pipeline.get_run_artifacts(run_id)
-print(artifacts["merge_geojson"])
+map(sequence, db_path=".silkloom_cache.db", run_id=None, workers=5) -> ResultSet
 ```
 
-## API Summary
+Accepted inputs:
 
-- `Pipeline.add_node(node, depends_on) -> Pipeline`
-- `Pipeline.add_collect_node(name, func, source_node=None, include_failed=False) -> Pipeline`
-- `Pipeline.run(inputs, run_id=None, show_workflow_prompt=True, show_progress=True, show_stage_prompt=True, progress_callback=None) -> str`
-- `Pipeline.export_results(run_id, format="json") -> list[dict]`
-- `Pipeline.get_run_artifacts(run_id) -> dict[str, dict]`
-- `Pipeline.describe_workflow() -> dict`
+- list[str]
+- list[dict]
+- pandas.DataFrame
+
+### ResultSet
+
+`ResultSet` behaves like a sequence aligned with the input order.
+
+Properties:
+
+- run_id
+- success_count
+- failed_count
+- total_tokens
+- errors
+
+Methods:
+
+- `results[0]`: returns the result at the same index as the input
+- `export_jsonl(path)`: write successful results to JSONL
+- `export_csv(path, flatten=False, include_usage=True)`: write a CSV export
+
+### TaskResult
+
+Each raw task result contains:
+
+- is_success
+- data
+- error
+- usage
+- input_data
 
 ## License
 
