@@ -37,3 +37,6 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["silkloom_core*"]
+
+[tool.setuptools.package-data]
+silkloom_core = ["py.typed"]

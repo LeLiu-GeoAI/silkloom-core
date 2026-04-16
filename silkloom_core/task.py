@@ -1,26 +1,89 @@
 from __future__ import annotations
 
 import hashlib
-import json
-from typing import Any, Union, Iterable, Type, List, Optional
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any, Generic, Optional, Protocol, TypeVar, overload
 
 import jinja2
+import pandas as pd
 from openai import OpenAI
 from pydantic import BaseModel
 
 from .results import ResultSet
 from .types import TaskResult
 
+TModel = TypeVar("TModel", bound=BaseModel)
+TOutput = TypeVar("TOutput")
 
-class LLMTask:
+PromptContext = dict[str, Any]
+
+
+class _ChatCompletionsProtocol(Protocol):
+    def create(self, *, model: str, messages: list[dict[str, Any]]) -> Any:
+        ...
+
+
+class _ChatProtocol(Protocol):
+    completions: _ChatCompletionsProtocol
+
+
+class _BetaChatCompletionsProtocol(Protocol):
+    def parse(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        response_format: type[BaseModel],
+    ) -> Any:
+        ...
+
+
+class _BetaChatProtocol(Protocol):
+    completions: _BetaChatCompletionsProtocol
+
+
+class _BetaProtocol(Protocol):
+    chat: _BetaChatProtocol
+
+
+class OpenAIClientProtocol(Protocol):
+    chat: _ChatProtocol
+    beta: _BetaProtocol
+
+
+class LLMTask(Generic[TOutput]):
+    @overload
+    def __init__(
+        self: "LLMTask[str]",
+        model: str,
+        user_prompt: str,
+        system_prompt: Optional[str] = None,
+        response_model: None = None,
+        max_retries: int = 3,
+        client: Optional[OpenAIClientProtocol] = None,
+    ):
+        ...
+
+    @overload
+    def __init__(
+        self: "LLMTask[TModel]",
+        model: str,
+        user_prompt: str,
+        system_prompt: Optional[str] = None,
+        response_model: type[TModel] = ...,
+        max_retries: int = 3,
+        client: Optional[OpenAIClientProtocol] = None,
+    ):
+        ...
+
     def __init__(
         self,
         model: str,
         user_prompt: str,
         system_prompt: Optional[str] = None,
-        response_model: Optional[Type[BaseModel]] = None,
+        response_model: Optional[type[BaseModel]] = None,
         max_retries: int = 3,
-        client: Optional[Any] = None
+        client: Optional[OpenAIClientProtocol] = None,
     ):
         """Create an LLM batch task.
 
@@ -43,9 +106,9 @@ class LLMTask:
         self.user_template = self._template_env.from_string(user_prompt)
         self.system_template = self._template_env.from_string(system_prompt) if system_prompt else None
 
-    def _render_messages(self, item: dict) -> List[dict]:
+    def _render_messages(self, item: PromptContext) -> list[dict[str, Any]]:
         """将输入字典渲染为 OpenAI API 需要的 messages 列表"""
-        messages = []
+        messages: list[dict[str, Any]] = []
         if self.system_template:
             messages.append({"role": "system", "content": self.system_template.render(**item)})
 
@@ -64,7 +127,7 @@ class LLMTask:
             
         return messages
 
-    def _execute_single(self, item: dict) -> TaskResult:
+    def _execute_single(self, item: PromptContext) -> TaskResult[TOutput]:
         """执行单次 API 调用，供 engine.py 在线程池中调用"""
         messages = self._render_messages(item)
         last_error = None
@@ -100,13 +163,43 @@ class LLMTask:
 
         return TaskResult(is_success=False, error=last_error, input_data=item)
 
+    @overload
+    def map(
+        self,
+        sequence: Sequence[str],
+        db_path: str = ".silkloom_cache.db",
+        run_id: Optional[str] = None,
+        workers: int = 5,
+    ) -> ResultSet[TOutput]:
+        ...
+
+    @overload
+    def map(
+        self,
+        sequence: Iterable[Mapping[str, Any]],
+        db_path: str = ".silkloom_cache.db",
+        run_id: Optional[str] = None,
+        workers: int = 5,
+    ) -> ResultSet[TOutput]:
+        ...
+
+    @overload
+    def map(
+        self,
+        sequence: pd.DataFrame,
+        db_path: str = ".silkloom_cache.db",
+        run_id: Optional[str] = None,
+        workers: int = 5,
+    ) -> ResultSet[TOutput]:
+        ...
+
     def map(
         self,
         sequence: Any,
         db_path: str = ".silkloom_cache.db",
         run_id: Optional[str] = None,
         workers: int = 5,
-    ) -> ResultSet:
+    ) -> ResultSet[TOutput]:
         """将任务映射到数据序列，执行并发处理。
 
         支持三类常见输入：
@@ -116,12 +209,12 @@ class LLMTask:
         """
         
         # 1. 鸭子类型检测：统一转为 List[dict]
-        if hasattr(sequence, "to_dict") and hasattr(sequence, "columns"):
-            inputs = sequence.to_dict(orient="records") # Pandas DataFrame
+        if isinstance(sequence, pd.DataFrame):
+            inputs: list[PromptContext] = sequence.to_dict(orient="records") # Pandas DataFrame
         elif isinstance(sequence, (list, tuple)) and len(sequence) > 0 and isinstance(sequence[0], str):
             inputs = [{"text": item} for item in sequence] # 纯字符串列表
         else:
-            inputs = list(sequence) # 已经是字典列表
+            inputs = [dict(item) for item in sequence] # 已经是字典列表
             
         # 2. 自动生成 run_id
         if not run_id:

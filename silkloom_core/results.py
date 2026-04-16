@@ -3,19 +3,29 @@ from __future__ import annotations
 import csv
 import json
 from collections.abc import Sequence
-from typing import Any, List, Optional
+from typing import Any, Generic, TypeVar, overload
 
 from .types import TaskResult
 
+TResultData = TypeVar("TResultData")
 
-class ResultSet(Sequence):
-    def __init__(self, raw_results: List[TaskResult], run_id: str):
+
+class ResultSet(Sequence[object], Generic[TResultData]):
+    def __init__(self, raw_results: list[TaskResult[TResultData]], run_id: str):
         self._raw = raw_results
         self._run_id = run_id
         # 核心魔法：成功则放数据，失败则放 None，保证与输入序列严格对齐
         self._data = [res.data if res.is_success else None for res in raw_results]
 
-    def __getitem__(self, index: int) -> Optional[Any]:
+    @overload
+    def __getitem__(self, index: int) -> TResultData | None:
+        ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[TResultData | None]:
+        ...
+
+    def __getitem__(self, index: int | slice) -> TResultData | None | list[TResultData | None]:
         return self._data[index]
 
     def __len__(self) -> int:
@@ -38,7 +48,7 @@ class ResultSet(Sequence):
         return sum(1 for r in self._raw if not r.is_success)
 
     @property
-    def errors(self) -> List[str]:
+    def errors(self) -> list[str]:
         return [r.error for r in self._raw if not r.is_success and r.error]
 
     def export_jsonl(self, path: str) -> None:

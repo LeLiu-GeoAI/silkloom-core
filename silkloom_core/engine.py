@@ -4,9 +4,18 @@ import sqlite3
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Any
+from typing import Any, Protocol, TypeVar
 
 from .types import TaskResult
+
+TOutput = TypeVar("TOutput")
+
+
+class _TaskInstanceProtocol(Protocol[TOutput]):
+    response_model: Any
+
+    def _execute_single(self, item: dict[str, Any]) -> TaskResult[TOutput]:
+        ...
 
 
 # 使用锁保证 SQLite 多线程写入安全
@@ -34,12 +43,12 @@ def _init_db(db_path: str):
 
 
 def _run_batch_engine(
-    task_instance: Any, 
-    inputs: List[Dict[str, Any]], 
+    task_instance: _TaskInstanceProtocol[TOutput], 
+    inputs: list[dict[str, Any]], 
     db_path: str,
     run_id: str, 
     workers: int
-) -> List[TaskResult]:
+) -> list[TaskResult[TOutput]]:
     
     _init_db(db_path)
     
@@ -90,7 +99,7 @@ def _run_batch_engine(
         conn.commit()
 
     # 2. 并发执行待处理的任务
-    def worker(idx: int, item: dict):
+    def worker(idx: int, item: dict[str, Any]):
         # 调用 LLMTask 内部的方法发起网络请求
         res = task_instance._execute_single(item)
         
