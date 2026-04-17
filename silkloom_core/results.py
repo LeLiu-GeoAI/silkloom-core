@@ -51,6 +51,21 @@ class ResultSet(Sequence[object], Generic[TResultData]):
     def errors(self) -> list[str]:
         return [r.error for r in self._raw if not r.is_success and r.error]
 
+    @property
+    def raw_results(self) -> list[TaskResult[TResultData]]:
+        """返回底层 TaskResult 列表（包含原始输出和错误信息）"""
+        return self._raw
+
+    @property
+    def raw_outputs(self) -> list[Any | None]:
+        """返回每条输入对应的原始模型输出（成功/失败都保留）"""
+        return [r.raw_output for r in self._raw]
+
+    @property
+    def reasonings(self) -> list[str | None]:
+        """返回每条输入对应的推理内容（若模型提供）"""
+        return [r.reasoning for r in self._raw]
+
     def export_jsonl(self, path: str) -> None:
         """导出为 JSONL 文件"""
         with open(path, "w", encoding="utf-8") as f:

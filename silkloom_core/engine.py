@@ -36,10 +36,22 @@ def _init_db(db_path: str):
                 result_data TEXT,
                 error_msg TEXT,
                 usage_data TEXT,
+                raw_output_data TEXT,
+                reasoning_data TEXT,
                 UNIQUE(run_id, item_index)
             )
             """
         )
+
+        # 为老版本数据库补齐新增字段，保证向后兼容
+        existing_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        if "raw_output_data" not in existing_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN raw_output_data TEXT")
+        if "reasoning_data" not in existing_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN reasoning_data TEXT")
 
 
 def _run_batch_engine(
@@ -62,13 +74,13 @@ def _run_batch_engine(
     with _db_lock:
         for idx, item in enumerate(inputs):
             cursor = conn.execute(
-                "SELECT status, result_data, error_msg, usage_data FROM tasks WHERE run_id=? AND item_index=?", 
+                "SELECT status, result_data, error_msg, usage_data, raw_output_data, reasoning_data FROM tasks WHERE run_id=? AND item_index=?", 
                 (run_id, idx),
             )
             row = cursor.fetchone()
             
             if row:
-                status, res_data, err_msg, usage_data = row
+                status, res_data, err_msg, usage_data, raw_output_data, reasoning_data = row
                 if status == "success":
                     # 已经成功的数据，直接反序列化恢复，跳过执行
                     parsed_data = json.loads(res_data)
@@ -81,12 +93,14 @@ def _run_batch_engine(
                         data=parsed_data, 
                         usage=json.loads(usage_data) if usage_data else None,
                         input_data=item,
+                        raw_output=json.loads(raw_output_data) if raw_output_data else None,
+                        reasoning=reasoning_data,
                     )
                 else:
                     # 历史失败/中断任务在新一轮运行时显式重置为 pending，确保会重试
                     conn.execute(
-                        "UPDATE tasks SET status=?, result_data=?, error_msg=?, usage_data=? WHERE run_id=? AND item_index=?",
-                        ("pending", None, None, None, run_id, idx),
+                        "UPDATE tasks SET status=?, result_data=?, error_msg=?, usage_data=?, raw_output_data=?, reasoning_data=? WHERE run_id=? AND item_index=?",
+                        ("pending", None, None, None, None, None, run_id, idx),
                     )
                     pending_tasks.append((idx, item))
             else:
@@ -100,18 +114,19 @@ def _run_batch_engine(
 
     # 2. 并发执行待处理的任务
     def worker(idx: int, item: dict[str, Any]):
-        # 调用 LLMTask 内部的方法发起网络请求
+        # 调用 PromptMapper 内部的方法发起网络请求
         res = task_instance._execute_single(item)
         
         # 将结果原子化写入数据库
         status = "success" if res.is_success else "failed"
         res_json = json.dumps(res.data.model_dump() if hasattr(res.data, "model_dump") else res.data, ensure_ascii=False) if res.data else None
         usage_json = json.dumps(res.usage) if res.usage else None
+        raw_output_json = json.dumps(res.raw_output, ensure_ascii=False) if res.raw_output is not None else None
 
         with _db_lock:
             conn.execute(
-                "UPDATE tasks SET status=?, result_data=?, error_msg=?, usage_data=? WHERE run_id=? AND item_index=?",
-                (status, res_json, res.error, usage_json, run_id, idx)
+                "UPDATE tasks SET status=?, result_data=?, error_msg=?, usage_data=?, raw_output_data=?, reasoning_data=? WHERE run_id=? AND item_index=?",
+                (status, res_json, res.error, usage_json, raw_output_json, res.reasoning, run_id, idx)
             )
             conn.commit()
             

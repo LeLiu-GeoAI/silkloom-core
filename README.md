@@ -1,14 +1,16 @@
-# SilkLoom Core
+﻿# SilkLoom Core
 
 [中文](README.zh-CN.md) | [English](README.md)
 
-SilkLoom Core V1.0.0 is a minimal, stateful LLM batch engine.
+SilkLoom Core is a minimal, stateful LLM batch engine.
 
 The public surface is intentionally small:
 
-- LLMTask
+- PromptMapper
 - ResultSet
-- TaskResult
+
+`TaskResult` is a low-level return object for advanced usage. Most users do not
+need to construct it directly.
 
 This README is split into two parts:
 
@@ -37,24 +39,24 @@ pip install -e .
 
 ```python
 from openai import OpenAI
-from silkloom_core import LLMTask
+from silkloom_core import PromptMapper
 
 client = OpenAI(api_key="your_key")
 
-task = LLMTask(
+mapper = PromptMapper(
     model="gpt-4o-mini",
     user_prompt="Translate into English: {{ text }}",
     client=client,
 )
 
-results = task.map(["你好", "今天天气不错"])
+results = mapper.map(["你好", "今天天气不错"])
 print(results[0])
 print(results.success_count, results.failed_count)
 ```
 
 ### Input Formats
 
-LLMTask.map() accepts three common input shapes:
+PromptMapper.map() accepts three common input shapes:
 
 - list[str]: each string is wrapped as `{"text": ...}`
 - list[dict]: each dict becomes one prompt context
@@ -65,14 +67,14 @@ If you want to pass a DataFrame, install pandas separately. It is not required f
 Dictionary list example:
 
 ```python
-from silkloom_core import LLMTask
+from silkloom_core import PromptMapper
 
-task = LLMTask(
+mapper = PromptMapper(
     model="gpt-4o-mini",
     user_prompt="Extract name and intent from text: {{ text }}",
 )
 
-results = task.map([
+results = mapper.map([
     {"text": "My name is Alice. I want a refund."},
     {"text": "Bob asks about delivery."},
 ])
@@ -84,7 +86,7 @@ Each DataFrame row is treated as one input item, and the column names are availa
 
 ```python
 import pandas as pd
-from silkloom_core import LLMTask
+from silkloom_core import PromptMapper
 
 df = pd.DataFrame(
     [
@@ -93,12 +95,12 @@ df = pd.DataFrame(
     ]
 )
 
-task = LLMTask(
+mapper = PromptMapper(
     model="gpt-4o-mini",
     user_prompt="Rewrite the following {{ lang }} text: {{ text }}",
 )
 
-results = task.map(df)
+results = mapper.map(df)
 ```
 
 ### Prompt Template Rules
@@ -106,7 +108,7 @@ results = task.map(df)
 Template variables must match the keys in the input context.
 
 ```python
-task = LLMTask(
+mapper = PromptMapper(
     model="gpt-4o-mini",
     user_prompt="Rewrite the following {{ lang }} text: {{ text }}",
 )
@@ -122,7 +124,7 @@ For a DataFrame, this row exposes `text` and `lang` to the template:
 
 ```python
 from pydantic import BaseModel
-from silkloom_core import LLMTask
+from silkloom_core import PromptMapper
 
 
 class ExtractInfo(BaseModel):
@@ -130,13 +132,13 @@ class ExtractInfo(BaseModel):
     intent: str
 
 
-task = LLMTask(
+mapper = PromptMapper(
     model="gpt-4o-mini",
     user_prompt="Extract name and intent from text: {{ text }}",
     response_model=ExtractInfo,
 )
 
-results = task.map([
+results = mapper.map([
     {"text": "My name is Alice. I want a refund."},
     {"text": "Bob asks about delivery."},
 ])
@@ -151,40 +153,40 @@ print(results[0].name)
 ```python
 import os
 from openai import OpenAI
-from silkloom_core import LLMTask
+from silkloom_core import PromptMapper
 
 glm_client = OpenAI(
     api_key=os.environ["ZHIPUAI_API_KEY"],
     base_url="https://open.bigmodel.cn/api/paas/v4/",
 )
 
-task = LLMTask(
+mapper = PromptMapper(
     model="glm-4-flash",
     user_prompt="Summarize this text: {{ text }}",
     client=glm_client,
 )
 
-results = task.map(["Urban renewal should balance efficiency and equity."])
+results = mapper.map(["Urban renewal should balance efficiency and equity."])
 ```
 
 #### Ollama
 
 ```python
 from openai import OpenAI
-from silkloom_core import LLMTask
+from silkloom_core import PromptMapper
 
 ollama_client = OpenAI(
     api_key="ollama",
     base_url="http://localhost:11434/v1",
 )
 
-task = LLMTask(
+mapper = PromptMapper(
     model="qwen2.5:7b",
     user_prompt="Rewrite in academic tone: {{ text }}",
     client=ollama_client,
 )
 
-results = task.map(["Traffic is usually worst in evening peak."])
+results = mapper.map(["Traffic is usually worst in evening peak."])
 ```
 
 ### Multimodal Input
@@ -192,14 +194,14 @@ results = task.map(["Traffic is usually worst in evening peak."])
 Pass image sources in `images` (supports local path, URL, or base64/data URI):
 
 ```python
-from silkloom_core import LLMTask
+from silkloom_core import PromptMapper
 
-task = LLMTask(
+mapper = PromptMapper(
     model="gpt-4o",
     user_prompt="Describe these images and answer: {{ text }}",
 )
 
-results = task.map([
+results = mapper.map([
     {
         "text": "What is shown?",
         "images": ["./pic1.jpg", "https://example.com/pic2.png"],
@@ -212,7 +214,7 @@ results = task.map([
 `map` supports resumability with SQLite via `db_path` + `run_id`:
 
 ```python
-results = task.map(
+results = mapper.map(
     [{"text": "a"}, {"text": "b"}],
     db_path="my_run.db",
     run_id="demo_001",
@@ -221,6 +223,22 @@ results = task.map(
 ```
 
 Running again with the same `run_id` reuses successful records.
+
+### Single Item Execution
+
+Use `run_one` when you only need one input:
+
+```python
+from silkloom_core import PromptMapper
+
+mapper = PromptMapper(
+    model="gpt-4o-mini",
+    user_prompt="Summarize in one sentence: {{ text }}",
+)
+
+result = mapper.run_one({"text": "Cities need compact and equitable transit systems."})
+print(result.is_success, result.data)
+```
 
 ### Exporting Results
 
@@ -232,6 +250,8 @@ results.success_count
 results.failed_count
 results.total_tokens
 results.errors
+results.raw_outputs      # raw model payload for each input (success and failure)
+results.reasonings       # model reasoning/think text if provided by the backend
 results[0]
 results.export_jsonl("out.jsonl")
 results.export_csv("out.csv", flatten=True)
@@ -239,12 +259,12 @@ results.export_csv("out.csv", flatten=True)
 
 ## API Reference
 
-### LLMTask
+### PromptMapper
 
 Constructor:
 
 ```python
-LLMTask(
+PromptMapper(
     model: str,
     user_prompt: str,
     system_prompt: str | None = None,
@@ -266,6 +286,7 @@ Arguments:
 Method:
 
 ```python
+run_one(item: str | dict[str, Any]) -> TaskResult
 map(sequence, db_path=".silkloom_cache.db", run_id=None, workers=5) -> ResultSet
 ```
 
@@ -286,6 +307,9 @@ Properties:
 - failed_count
 - total_tokens
 - errors
+- raw_outputs
+- reasonings
+- raw_results
 
 Methods:
 
@@ -302,7 +326,28 @@ Each raw task result contains:
 - error
 - usage
 - input_data
+- raw_output
+- reasoning
+
+Note: in typical usage, you do not need to instantiate `TaskResult` manually.
+You only read it from `run_one(...)` or `results.raw_results`.
+
+### Access Raw Output and Think Content
+
+SilkLoom stores raw model output for every item, including failed items:
+
+```python
+for i, task_result in enumerate(results.raw_results):
+    print(i, task_result.is_success)
+    print("raw:", task_result.raw_output)
+    print("error:", task_result.error)
+```
+
+For think/reasoning models, SilkLoom tries to extract reasoning from common fields
+(`reasoning`, `reasoning_content`) and from `<think>...</think>` blocks. If the model
+or provider does not expose reasoning, `reasoning` will be `None`.
 
 ## License
 
 MIT
+

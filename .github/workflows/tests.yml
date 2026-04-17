@@ -38,4 +38,4 @@ jobs:
 
       - name: Test imports
         run: |
-          python -c "from silkloom_core import LLMTask, ResultSet, TaskResult; print('✓ Imports successful')"
+          python -c "from silkloom_core import PromptMapper, ResultSet, TaskResult; print('✓ Imports successful')"

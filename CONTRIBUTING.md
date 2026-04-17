@@ -42,7 +42,7 @@ Tests will run automatically on PR via GitHub Actions. You can also run locally:
 ```bash
 python -m pytest
 # or just check imports
-python -c "from silkloom_core import LLMTask, ResultSet, TaskResult; print('✓')"
+python -c "from silkloom_core import PromptMapper, ResultSet, TaskResult; print('✓')"
 ```
 
 ## Release Process
