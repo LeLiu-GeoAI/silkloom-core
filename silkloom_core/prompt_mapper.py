@@ -7,6 +7,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Generic, Optional, Protocol, TypeVar, overload
 
 import jinja2
+from json_repair import repair_json
 from openai import OpenAI
 from pydantic import BaseModel
 
@@ -20,8 +21,6 @@ TModel = TypeVar("TModel", bound=BaseModel)
 TOutput = TypeVar("TOutput")
 
 PromptContext = dict[str, Any]
-
-
 class _ChatCompletionsProtocol(Protocol):
     def create(self, *, model: str, messages: list[dict[str, Any]]) -> Any:
         ...
@@ -31,28 +30,8 @@ class _ChatProtocol(Protocol):
     completions: _ChatCompletionsProtocol
 
 
-class _BetaChatCompletionsProtocol(Protocol):
-    def parse(
-        self,
-        *,
-        model: str,
-        messages: list[dict[str, Any]],
-        response_format: type[BaseModel],
-    ) -> Any:
-        ...
-
-
-class _BetaChatProtocol(Protocol):
-    completions: _BetaChatCompletionsProtocol
-
-
-class _BetaProtocol(Protocol):
-    chat: _BetaChatProtocol
-
-
 class OpenAIClientProtocol(Protocol):
     chat: _ChatProtocol
-    beta: _BetaProtocol
 
 
 class PromptMapper(Generic[TOutput]):
@@ -99,6 +78,8 @@ class PromptMapper(Generic[TOutput]):
         """
         self.model = model
         self.response_model = response_model
+        if max_retries < 1:
+            raise ValueError("max_retries must be >= 1.")
         self.max_retries = max_retries
         # 默认使用官方客户端，也可注入第三方 (如 GLM, Ollama)
         self.client = client or OpenAI()
@@ -119,6 +100,53 @@ class PromptMapper(Generic[TOutput]):
         if isinstance(value, (dict, list, str, int, float, bool)):
             return value
         return str(value)
+
+    @staticmethod
+    def _content_to_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            for part in content:
+                if isinstance(part, dict):
+                    text = part.get("text") or part.get("content")
+                else:
+                    text = getattr(part, "text", None) or getattr(part, "content", None)
+                if isinstance(text, str):
+                    text_parts.append(text)
+            return "\n".join(text_parts)
+        return ""
+
+    @staticmethod
+    def _strip_markdown_code_fence(text: str) -> str:
+        match = re.match(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", text, flags=re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return text.strip()
+
+    @classmethod
+    def _extract_json_like_text(cls, text: str) -> str:
+        cleaned = cls._strip_markdown_code_fence(text)
+        if not cleaned:
+            return cleaned
+
+        decoder = json.JSONDecoder()
+        for idx, ch in enumerate(cleaned):
+            if ch not in "[{":
+                continue
+            try:
+                _, end = decoder.raw_decode(cleaned[idx:])
+                return cleaned[idx : idx + end]
+            except json.JSONDecodeError:
+                continue
+        return cleaned
+
+    @classmethod
+    def _parse_response_model_from_content(cls, response_model: type[BaseModel], content: Any) -> BaseModel:
+        content_text = cls._content_to_text(content)
+        json_text = cls._extract_json_like_text(content_text)
+        repaired_json = repair_json(json_text, ensure_ascii=False)
+        return response_model.model_validate_json(repaired_json)
 
     @staticmethod
     def _extract_reasoning(completion: Any) -> Optional[str]:
@@ -145,11 +173,13 @@ class PromptMapper(Generic[TOutput]):
         if isinstance(content, list):
             reasoning_parts: list[str] = []
             for part in content:
-                if not isinstance(part, dict):
-                    continue
-                part_type = part.get("type")
-                if part_type in {"reasoning", "thinking", "reasoning_text"}:
+                if isinstance(part, dict):
+                    part_type = part.get("type")
                     text = part.get("text") or part.get("content")
+                else:
+                    part_type = getattr(part, "type", None)
+                    text = getattr(part, "text", None) or getattr(part, "content", None)
+                if part_type in {"reasoning", "thinking", "reasoning_text"}:
                     if isinstance(text, str) and text.strip():
                         reasoning_parts.append(text.strip())
             if reasoning_parts:
@@ -168,7 +198,7 @@ class PromptMapper(Generic[TOutput]):
         # 多模态处理：如果存在 images 字段，转化为数组结构
         images = item.get("images", [])
         if images:
-            content_list = [{"type": "text", "text": user_content}]
+            content_list: list[dict[str, Any]] = [{"type": "text", "text": user_content}]
             for img in images:
                 # 这里简单处理，假设已经是 url 或 base64 data URI
                 content_list.append({"type": "image_url", "image_url": {"url": img}})
@@ -188,15 +218,18 @@ class PromptMapper(Generic[TOutput]):
             try:
                 # 结构化输出模式 (Pydantic)
                 if self.response_model:
-                    completion = self.client.beta.chat.completions.parse(
+                    completion = self.client.chat.completions.create(
                         model=self.model,
-                        messages=messages,
-                        response_format=self.response_model,
+                        messages=messages,  # type: ignore
                     )
                     raw_output = self._normalize_raw_output(completion)
+                    parsed_data = self._parse_response_model_from_content(
+                        self.response_model,
+                        completion.choices[0].message.content,
+                    )
                     return TaskResult(
                         is_success=True,
-                        data=completion.choices[0].message.parsed,
+                        data=parsed_data,
                         usage=completion.usage.model_dump() if completion.usage else None,
                         input_data=item,
                         raw_output=raw_output,
@@ -240,6 +273,9 @@ class PromptMapper(Generic[TOutput]):
         raise TypeError("Each input item must be str or mapping[str, Any].")
 
     def _normalize_batch_inputs(self, sequence: Any) -> list[PromptContext]:
+        if isinstance(sequence, str):
+            raise TypeError("map() expects a sequence of items, not a single string. Use run_one() or wrap it in a list.")
+
         # Pandas DataFrame: each row is one context dictionary
         if hasattr(sequence, "to_dict") and hasattr(sequence, "columns"):
             records = sequence.to_dict(orient="records")
@@ -316,6 +352,9 @@ class PromptMapper(Generic[TOutput]):
         - 字典序列: 原样作为模板上下文
         """
         
+        if workers < 1:
+            raise ValueError("workers must be >= 1.")
+
         # 1. 统一输入归一化（DataFrame / 字符串序列 / 字典序列）
         inputs = self._normalize_batch_inputs(sequence)
             
@@ -325,6 +364,6 @@ class PromptMapper(Generic[TOutput]):
             
         # 3. 驱动底层并发与数据库状态机
         from .engine import _run_batch_engine
-        raw_results = _run_batch_engine(self, inputs, db_path, run_id, workers)
+        task_results = _run_batch_engine(self, inputs, db_path, run_id, workers)
 
-        return ResultSet(raw_results, run_id)
+        return ResultSet(task_results, run_id)

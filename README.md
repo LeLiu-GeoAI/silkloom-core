@@ -9,9 +9,6 @@ The public surface is intentionally small:
 - PromptMapper
 - ResultSet
 
-`TaskResult` is a low-level return object for advanced usage. Most users do not
-need to construct it directly.
-
 This README is split into two parts:
 
 1. User Guide: installation, input formats, prompt rules, and examples.
@@ -50,7 +47,7 @@ mapper = PromptMapper(
 )
 
 results = mapper.map(["你好", "今天天气不错"])
-print(results[0])
+print(results[0].data)
 print(results.success_count, results.failed_count)
 ```
 
@@ -143,8 +140,10 @@ results = mapper.map([
     {"text": "Bob asks about delivery."},
 ])
 
-print(results[0].name)
+print(results[0].data.name)
 ```
+
+Note: if a model returns JSON wrapped in a ```json ... ``` code fence, SilkLoom will strip the fence and extract valid JSON before `response_model` validation.
 
 ### GLM and Ollama
 
@@ -250,6 +249,10 @@ results.success_count
 results.failed_count
 results.total_tokens
 results.errors
+results.outputs          # parsed output for each input (success or None on failure)
+results.results          # full TaskResult list
+results.successful()     # only successful TaskResult entries
+results.failed()         # only failed TaskResult entries
 results.raw_outputs      # raw model payload for each input (success and failure)
 results.reasonings       # model reasoning/think text if provided by the backend
 results[0]
@@ -290,6 +293,12 @@ run_one(item: str | dict[str, Any]) -> TaskResult
 map(sequence, db_path=".silkloom_cache.db", run_id=None, workers=5) -> ResultSet
 ```
 
+Validation rules:
+
+- `max_retries` must be >= 1
+- `workers` must be >= 1
+- `map` does not accept a single string (use `run_one("...")` or `map(["..."])`)
+
 Accepted inputs:
 
 - list[str]
@@ -307,13 +316,16 @@ Properties:
 - failed_count
 - total_tokens
 - errors
+- outputs
+- results
 - raw_outputs
 - reasonings
-- raw_results
 
 Methods:
 
-- `results[0]`: returns the result at the same index as the input
+- `results[0]`: returns the TaskResult at the same index as the input
+- `successful()`: returns successful TaskResult entries
+- `failed()`: returns failed TaskResult entries
 - `export_jsonl(path)`: write successful results to JSONL
 - `export_csv(path, flatten=False, include_usage=True)`: write a CSV export
 
@@ -330,14 +342,14 @@ Each raw task result contains:
 - reasoning
 
 Note: in typical usage, you do not need to instantiate `TaskResult` manually.
-You only read it from `run_one(...)` or `results.raw_results`.
+You only read it from `run_one(...)`, `results[0]`, or `results.results`.
 
 ### Access Raw Output and Think Content
 
 SilkLoom stores raw model output for every item, including failed items:
 
 ```python
-for i, task_result in enumerate(results.raw_results):
+for i, task_result in enumerate(results.results):
     print(i, task_result.is_success)
     print("raw:", task_result.raw_output)
     print("error:", task_result.error)

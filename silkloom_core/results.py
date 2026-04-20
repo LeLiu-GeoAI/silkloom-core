@@ -10,26 +10,24 @@ from .types import TaskResult
 TResultData = TypeVar("TResultData")
 
 
-class ResultSet(Sequence[object], Generic[TResultData]):
+class ResultSet(Sequence[TaskResult[TResultData]], Generic[TResultData]):
     def __init__(self, raw_results: list[TaskResult[TResultData]], run_id: str):
         self._raw = raw_results
         self._run_id = run_id
-        # 核心魔法：成功则放数据，失败则放 None，保证与输入序列严格对齐
-        self._data = [res.data if res.is_success else None for res in raw_results]
 
     @overload
-    def __getitem__(self, index: int) -> TResultData | None:
+    def __getitem__(self, index: int) -> TaskResult[TResultData]:
         ...
 
     @overload
-    def __getitem__(self, index: slice) -> list[TResultData | None]:
+    def __getitem__(self, index: slice) -> list[TaskResult[TResultData]]:
         ...
 
-    def __getitem__(self, index: int | slice) -> TResultData | None | list[TResultData | None]:
-        return self._data[index]
+    def __getitem__(self, index: int | slice) -> TaskResult[TResultData] | list[TaskResult[TResultData]]:
+        return self._raw[index]
 
     def __len__(self) -> int:
-        return len(self._data)
+        return len(self._raw)
 
     @property
     def run_id(self) -> str:
@@ -52,9 +50,22 @@ class ResultSet(Sequence[object], Generic[TResultData]):
         return [r.error for r in self._raw if not r.is_success and r.error]
 
     @property
-    def raw_results(self) -> list[TaskResult[TResultData]]:
-        """返回底层 TaskResult 列表（包含原始输出和错误信息）"""
-        return self._raw
+    def results(self) -> list[TaskResult[TResultData]]:
+        """返回任务级结果列表（每一项包含 data / raw_output / error 等字段）。"""
+        return list(self._raw)
+
+    @property
+    def outputs(self) -> list[TResultData | None]:
+        """返回与输入严格对齐的解析结果列表（成功为 data，失败为 None）。"""
+        return [res.data if res.is_success else None for res in self._raw]
+
+    def successful(self) -> list[TaskResult[TResultData]]:
+        """返回所有成功任务的结果对象。"""
+        return [res for res in self._raw if res.is_success]
+
+    def failed(self) -> list[TaskResult[TResultData]]:
+        """返回所有失败任务的结果对象。"""
+        return [res for res in self._raw if not res.is_success]
 
     @property
     def raw_outputs(self) -> list[Any | None]:

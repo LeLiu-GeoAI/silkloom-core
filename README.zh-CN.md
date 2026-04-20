@@ -8,7 +8,6 @@ SilkLoom Core 是一个极简、带状态持久化的大模型批处理引擎。
 - PromptMapper
 - ResultSet
 
-其中 `TaskResult` 是底层返回对象（高级用法），通常不需要你手动创建。
 
 本文档分成两部分：
 
@@ -48,7 +47,7 @@ mapper = PromptMapper(
 )
 
 results = mapper.map(["你好", "今天天气不错"])
-print(results[0])
+print(results[0].data)
 print(results.success_count, results.failed_count)
 ```
 
@@ -141,8 +140,10 @@ results = mapper.map([
     {"text": "Bob 在咨询物流"},
 ])
 
-print(results[0].name)
+print(results[0].data.name)
 ```
+
+说明：如果模型返回的是 ```json ... ``` 代码块，SilkLoom 会自动去掉围栏并提取 JSON 后再做 `response_model` 校验。
 
 ### 其他模型（GLM / Ollama）
 
@@ -248,6 +249,10 @@ results.success_count
 results.failed_count
 results.total_tokens
 results.errors
+results.outputs          # 每条输入对应的解析结果（成功为 data，失败为 None）
+results.results          # 完整 TaskResult 列表
+results.successful()     # 仅成功任务
+results.failed()         # 仅失败任务
 results.raw_outputs      # 每条输入对应的原始模型输出（成功/失败都保留）
 results.reasonings       # 若后端返回推理字段，则这里可拿到 think/reasoning 文本
 results[0]
@@ -288,6 +293,12 @@ run_one(item: str | dict[str, Any]) -> TaskResult
 map(sequence, db_path=".silkloom_cache.db", run_id=None, workers=5) -> ResultSet
 ```
 
+参数约束：
+
+- `max_retries` 必须 >= 1
+- `workers` 必须 >= 1
+- `map` 不接受单个字符串（请使用 `run_one("...")` 或 `map(["..."])`）
+
 支持的输入类型：
 
 - list[str]
@@ -305,13 +316,16 @@ map(sequence, db_path=".silkloom_cache.db", run_id=None, workers=5) -> ResultSet
 - failed_count
 - total_tokens
 - errors
+- outputs
+- results
 - raw_outputs
 - reasonings
-- raw_results
 
 方法：
 
-- `results[0]`：返回和输入同索引的结果
+- `results[0]`：返回和输入同索引的 TaskResult
+- `successful()`：返回成功任务列表
+- `failed()`：返回失败任务列表
 - `export_jsonl(path)`：导出成功结果到 JSONL
 - `export_csv(path, flatten=False, include_usage=True)`：导出 CSV
 
@@ -327,14 +341,14 @@ map(sequence, db_path=".silkloom_cache.db", run_id=None, workers=5) -> ResultSet
 - raw_output
 - reasoning
 
-说明：普通使用中你不需要手动构造 `TaskResult`，只需要读取 `run_one(...)` 或 `results.raw_results` 返回的对象即可。
+说明：普通使用中你不需要手动构造 `TaskResult`，只需要读取 `run_one(...)`、`results[0]` 或 `results.results` 返回的对象即可。
 
 ### 获取原始输出与 Think 内容
 
 SilkLoom 会为每条输入保留原始模型输出，包括失败项：
 
 ```python
-for i, task_result in enumerate(results.raw_results):
+for i, task_result in enumerate(results.results):
     print(i, task_result.is_success)
     print("raw:", task_result.raw_output)
     print("error:", task_result.error)
