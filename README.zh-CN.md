@@ -1,25 +1,37 @@
-﻿# SilkLoom Core
+# SilkLoom Core
 
 [中文](README.zh-CN.md) | [English](README.md)
 
-SilkLoom Core 是一个极简、带状态持久化的大模型批处理引擎。
-对外暴露的公共 API 很小：
+SilkLoom Core 是一个极简、带状态持久化的大模型批处理引擎。对外暴露的公共 API 极度克制，仅包含 PromptMapper 和 ResultSet，却能覆盖大多数 LLM 批处理场景。
 
-- PromptMapper
-- ResultSet
+**✨ 特性摘要**
 
+- **极简 API**：一行代码完成单条/批量处理，心智负担低。
+- **状态持久化**：内置 SQLite 断点续跑，中断后可继续。
+- **零依赖数据集成**：支持 to_dicts()；安装 pandas 后可一键 to_pandas()。
+- **全异步支持**：提供 asyncio API，便于接入 FastAPI/Gradio/Streamlit。
+- **强格式校验**：结合 Pydantic 做结构化校验，并自动提取 JSON。
+- **推理文本提取**：自动提取 reasoning 或 <think> 推理过程（若模型提供）。
 
-本文档分成两部分：
-
-1. 用户指南：安装、输入类型、提示词规则和示例。
-2. API 文档：构造参数、方法签名和返回对象。
-
-提示词模板使用严格的 Jinja2 语法。`user_prompt` 和 `system_prompt` 会针对每条输入数据渲染，模板里的变量名必须与该条输入字典的键一致。缺失变量会直接报错，不会静默渲染为空字符串。对于纯字符串列表，SilkLoom 会自动包装成 `{"text": "..."}`。
-
-## 安装
+## 1. 安装
 
 ```bash
 pip install silkloom-core
+```
+
+注：核心功能不依赖 pandas。只有在使用 to_pandas() 时，才需要额外安装 pandas。
+
+可选功能依赖安装：
+
+```bash
+# DataFrame 导出支持
+pip install "silkloom-core[data]"
+
+# 进度条支持
+pip install "silkloom-core[progress]"
+
+# 一次安装所有可选能力
+pip install "silkloom-core[full]"
 ```
 
 源码安装：
@@ -30,9 +42,9 @@ cd silkloom-core
 pip install -e .
 ```
 
-## 用户指南
+## 2. 基础教程
 
-### 快速开始
+### 2.1 快速开始
 
 ```python
 from openai import OpenAI
@@ -44,162 +56,124 @@ mapper = PromptMapper(
     model="gpt-4o-mini",
     user_prompt="请翻译成英文：{{ text }}",
     client=client,
+    temperature=0.5,  # 额外参数会透传给 LLM
 )
 
 results = mapper.map(["你好", "今天天气不错"])
+# 默认显示进度条（需安装 tqdm），可通过 show_progress=False 关闭
+
 print(results[0].data)
-print(results.success_count, results.failed_count)
+print(f"成功: {results.success_count}, 失败: {results.failed_count}")
 ```
 
-### 输入类型
+### 2.2 输入类型
 
-PromptMapper.map() 支持三种常见输入：
+模板使用严格 Jinja2 语法。模板变量必须与输入键一致，缺失变量会直接报错。
 
-- list[str]：每个字符串会自动包装成 `{"text": ...}`
-- list[dict]：每个字典会作为一条输入上下文
-- pandas.DataFrame：可选，每一行会作为一条输入上下文，列名会直接成为模板变量
+map() 支持三类输入：
 
-如果你要传 DataFrame，需要单独安装 pandas。普通用法不需要它。
-
-字典列表示例：
+1. **list[str]**：自动包装为 {"text": ...}
+2. **list[dict]**：最常用，字典 key 直接作为模板变量
+3. **pandas.DataFrame**：每行作为一条上下文，列名就是模板变量
 
 ```python
-from silkloom_core import PromptMapper
-
-mapper = PromptMapper(
-    model="gpt-4o-mini",
-    user_prompt="从文本中提取姓名和意图：{{ text }}",
-)
-
+mapper = PromptMapper(model="gpt-4o-mini", user_prompt="提取意图：{{ text }}")
 results = mapper.map([
-    {"text": "我叫 Alice，我想退款"},
-    {"text": "Bob 在咨询物流"},
+    {"text": "我叫 Alice，我想退款", "id": 1},
+    {"text": "Bob 在咨询物流", "id": 2},
 ])
 ```
 
-### Pandas DataFrame
+### 2.3 结果访问与导出
 
-DataFrame 的每一行会被当作一条输入数据，列名会直接成为模板变量。
-
-```python
-import pandas as pd
-from silkloom_core import PromptMapper
-
-df = pd.DataFrame(
-    [
-        {"text": "城市热岛正在加剧。", "lang": "zh"},
-        {"text": "Urban renewal should balance efficiency and equity.", "lang": "en"},
-    ]
-)
-
-mapper = PromptMapper(
-    model="gpt-4o-mini",
-    user_prompt="请改写以下 {{ lang }} 文本：{{ text }}",
-)
-
-results = mapper.map(df)
-```
-
-### 提示词模板规则
-
-模板里的变量名必须和输入上下文中的键一致。
+ResultSet 提供任务级访问、统计信息和导出能力。
 
 ```python
-mapper = PromptMapper(
-    model="gpt-4o-mini",
-    user_prompt="请改写以下 {{ lang }} 文本：{{ text }}",
-)
+# 1) DataFrame（需要 pandas）
+df = results.to_pandas(merge_input=True)
+
+# 2) 字典列表（零依赖）
+dicts = results.to_dicts(merge_input=True)
+
+# 3) 文件导出
+results.export_jsonl("out.jsonl")
+results.export_csv("out.csv", flatten=True)
+
+# 4) 常用访问
+print(results.successful())
+print(results.raw_outputs)
+print(results.reasonings)
 ```
 
-如果输入是 DataFrame 的一行，下面这些列名就会直接暴露给模板：
+### 2.4 单条执行
 
 ```python
-{"text": "城市热岛正在加剧。", "lang": "zh"}
+result = mapper.run_one({"text": "城市交通系统需要兼顾效率与公平。"})
+print(result.is_success, result.data)
 ```
 
-### 结构化输出
+## 3. 进阶特性
+
+### 3.1 结构化输出校验（Pydantic）
+
+传入 response_model 后，SilkLoom 会自动提取 JSON（包括 markdown 围栏中的 JSON），并执行 Pydantic 校验。
 
 ```python
 from pydantic import BaseModel
-from silkloom_core import PromptMapper
-
 
 class ExtractInfo(BaseModel):
     name: str
     intent: str
 
-
 mapper = PromptMapper(
     model="gpt-4o-mini",
-    user_prompt="从文本中提取姓名和意图：{{ text }}",
+    user_prompt="提取姓名和意图：{{ text }}",
     response_model=ExtractInfo,
 )
 
-results = mapper.map([
-    {"text": "我叫 Alice，我想退款"},
-    {"text": "Bob 在咨询物流"},
-])
-
+results = mapper.map([{"text": "我叫 Alice，想退款"}])
 print(results[0].data.name)
 ```
 
-说明：如果模型返回的是 ```json ... ``` 代码块，SilkLoom 会自动去掉围栏并提取 JSON 后再做 `response_model` 校验。
+### 3.2 异步并发处理（Asyncio）
 
-### 其他模型（GLM / Ollama）
-
-#### GLM-4-Flash
+适合集成到 FastAPI、Streamlit、Gradio 等框架。底层使用 Semaphore 控制并发。
 
 ```python
-import os
-from openai import OpenAI
+import asyncio
 from silkloom_core import PromptMapper
 
-glm_client = OpenAI(
-    api_key=os.environ["ZHIPUAI_API_KEY"],
-    base_url="https://open.bigmodel.cn/api/paas/v4/",
-)
+async def demo():
+    mapper = PromptMapper(model="gpt-4o-mini", user_prompt="请总结：{{ text }}")
 
-mapper = PromptMapper(
-    model="glm-4-flash",
-    user_prompt="请总结这段文本：{{ text }}",
-    client=glm_client,
-)
+    results = await mapper.amap(
+        [{"text": "城市热岛效应加剧。"}, {"text": "全球变暖趋势。"}],
+        max_concurrent=5,
+        show_progress=True,
+    )
+    print(results.success_count, results.failed_count)
 
-results = mapper.map(["城市更新要兼顾效率和公平。"])
+asyncio.run(demo())
 ```
 
-#### Ollama（本地）
+### 3.3 状态持久化（断点续跑）
+
+传入 db_path + run_id 即启用 SQLite 缓存。再次使用相同 run_id 时，会跳过已成功任务。
 
 ```python
-from openai import OpenAI
-from silkloom_core import PromptMapper
-
-ollama_client = OpenAI(
-    api_key="ollama",
-    base_url="http://localhost:11434/v1",
+results = mapper.map(
+    large_dataset,
+    db_path="my_run.db",
+    run_id="experiment_v1",
+    workers=5,
 )
-
-mapper = PromptMapper(
-    model="qwen2.5:7b",
-    user_prompt="请将这句话改写为学术表达：{{ text }}",
-    client=ollama_client,
-)
-
-results = mapper.map(["晚高峰交通拥堵最明显。"])
 ```
 
-### 多模态输入
+### 3.4 多模态输入（图片）
 
-在输入中使用 `images` 字段（支持本地路径、URL、base64/data URI）：
+在输入字典中包含 images 字段（支持本地路径、URL、base64/data URI）。
 
 ```python
-from silkloom_core import PromptMapper
-
-mapper = PromptMapper(
-    model="gpt-4o",
-    user_prompt="请分析图片并回答：{{ text }}",
-)
-
 results = mapper.map([
     {
         "text": "图里主要内容是什么？",
@@ -208,63 +182,35 @@ results = mapper.map([
 ])
 ```
 
-### 断点续跑
+## 4. 生态接入
 
-`map` 通过 `db_path` + `run_id` 提供 SQLite 级别断点续跑：
+SilkLoom 兼容 OpenAI 风格客户端，便于接入本地或第三方服务。
 
-```python
-results = mapper.map(
-    [{"text": "a"}, {"text": "b"}],
-    db_path="my_run.db",
-    run_id="demo_001",
-    workers=5,
-)
-```
-
-再次用同一个 `run_id` 运行时，会复用已成功结果。
-
-### 单条执行
-
-当你只需要处理一条输入时，使用 `run_one`：
+### 4.1 Ollama（本地）
 
 ```python
+from openai import OpenAI
 from silkloom_core import PromptMapper
 
-mapper = PromptMapper(
-    model="gpt-4o-mini",
-    user_prompt="请用一句话总结：{{ text }}",
-)
-
-result = mapper.run_one({"text": "城市交通系统需要兼顾效率、可达性与公平性。"})
-print(result.is_success, result.data)
+ollama_client = OpenAI(api_key="ollama", base_url="http://localhost:11434/v1")
+mapper = PromptMapper(model="qwen2.5:7b", user_prompt="{{ text }}", client=ollama_client)
 ```
 
-### 结果导出
-
-`ResultSet` 既可以直接索引，也可以导出文件：
+### 4.2 ZhipuAI / GLM
 
 ```python
-results.run_id
-results.success_count
-results.failed_count
-results.total_tokens
-results.errors
-results.outputs          # 每条输入对应的解析结果（成功为 data，失败为 None）
-results.results          # 完整 TaskResult 列表
-results.successful()     # 仅成功任务
-results.failed()         # 仅失败任务
-results.raw_outputs      # 每条输入对应的原始模型输出（成功/失败都保留）
-results.reasonings       # 若后端返回推理字段，则这里可拿到 think/reasoning 文本
-results[0]
-results.export_jsonl("out.jsonl")
-results.export_csv("out.csv", flatten=True)
+from openai import OpenAI
+from silkloom_core import PromptMapper
+
+glm_client = OpenAI(api_key="your_key", base_url="https://open.bigmodel.cn/api/paas/v4/")
+mapper = PromptMapper(model="glm-4-flash", user_prompt="{{ text }}", client=glm_client)
 ```
 
-## API 文档
+## 5. API 手册
 
-### PromptMapper
+### 5.1 PromptMapper
 
-构造函数：
+**构造函数**
 
 ```python
 PromptMapper(
@@ -274,90 +220,105 @@ PromptMapper(
     response_model: type[BaseModel] | None = None,
     max_retries: int = 3,
     client: Any | None = None,
+    **llm_kwargs,  # 如 temperature, top_p, max_tokens
 )
 ```
 
-参数说明：
+**核心方法**
 
-- model：目标模型名，例如 `gpt-4o-mini`
-- user_prompt：必填的用户提示词模板，使用 Jinja2 语法
-- system_prompt：可选的系统提示词模板，使用 Jinja2 语法
-- response_model：可选的 Pydantic 模型，用于结构化输出解析
-- max_retries：单条输入的最大重试次数
-- client：可选的 OpenAI 兼容客户端；不传则使用官方客户端
+- run_one(item: str | dict) -> TaskResult：同步单条执行
+- map(sequence, db_path=".silkloom_cache.db", run_id=None, workers=5, show_progress=True) -> ResultSet：同步批处理
+- arun_one(item: str | dict) -> TaskResult：异步单条执行
+- amap(sequence, db_path=".silkloom_cache.db", run_id=None, max_concurrent=5, show_progress=True) -> ResultSet：异步批处理
 
-方法：
+**参数约束**
 
-```python
-run_one(item: str | dict[str, Any]) -> TaskResult
-map(sequence, db_path=".silkloom_cache.db", run_id=None, workers=5) -> ResultSet
-```
+- max_retries >= 1
+- workers >= 1
+- max_concurrent >= 1
+- map() 不接受单个字符串，请使用 run_one("...") 或 map(["..."])
 
-参数约束：
+### 5.2 ResultSet
 
-- `max_retries` 必须 >= 1
-- `workers` 必须 >= 1
-- `map` 不接受单个字符串（请使用 `run_one("...")` 或 `map(["..."])`）
+严格按输入顺序对齐的结果集合。
 
-支持的输入类型：
-
-- list[str]
-- list[dict]
-- pandas.DataFrame
-
-### ResultSet
-
-`ResultSet` 的顺序与输入顺序严格对齐。
-
-属性：
+**常用属性**
 
 - run_id
-- success_count
-- failed_count
+- success_count / failed_count
 - total_tokens
-- errors
-- outputs
-- results
-- raw_outputs
-- reasonings
+- results（完整 TaskResult 列表）
+- raw_outputs（原始输出）
+- reasonings（推理文本）
 
-方法：
+**常用方法**
 
-- `results[0]`：返回和输入同索引的 TaskResult
-- `successful()`：返回成功任务列表
-- `failed()`：返回失败任务列表
-- `export_jsonl(path)`：导出成功结果到 JSONL
-- `export_csv(path, flatten=False, include_usage=True)`：导出 CSV
+- successful() / failed()
+- to_dicts(merge_input=True)
+- to_pandas(merge_input=True)
+- export_jsonl(path)
+- export_csv(path, flatten=False, include_usage=True)
 
-### TaskResult
+### 5.3 TaskResult
 
-每条底层任务结果包含：
+单条任务结果对象，核心字段包括：
 
-- is_success
-- data
-- error
-- usage
-- input_data
-- raw_output
-- reasoning
+- is_success：是否成功
+- data：解析后的结果
+- error：失败错误信息
+- input_data：原始输入
+- raw_output：模型原始输出
+- reasoning：推理文本（若有）
 
-说明：普通使用中你不需要手动构造 `TaskResult`，只需要读取 `run_one(...)`、`results[0]` 或 `results.results` 返回的对象即可。
+### 5.4 泛型与 IDE 类型提示
 
-### 获取原始输出与 Think 内容
-
-SilkLoom 会为每条输入保留原始模型输出，包括失败项：
+SilkLoom 已在 PromptMapper、ResultSet、TaskResult 中引入泛型，能够提升 IDE 对 data 字段的补全能力。
 
 ```python
-for i, task_result in enumerate(results.results):
-    print(i, task_result.is_success)
-    print("raw:", task_result.raw_output)
-    print("error:", task_result.error)
+from pydantic import BaseModel
+from silkloom_core import PromptMapper
+
+class ExtractInfo(BaseModel):
+    name: str
+    intent: str
+
+mapper = PromptMapper(response_model=ExtractInfo, model="gpt-4o-mini", user_prompt="{{ text }}")
+results = mapper.map([{"text": "我叫 Alice，想退款"}])
+
+first = results[0]
+if first.data is not None:
+    print(first.data.name)    # IDE 可推导为 ExtractInfo
+    print(first.data.intent)
 ```
 
-对于 think/reasoning 模型，SilkLoom 会优先尝试从常见字段（`reasoning`、`reasoning_content`）提取，
-并兼容 `<think>...</think>` 文本块。如果模型或服务商本身不返回推理内容，则 `reasoning` 为 `None`。
+当未设置 response_model 时，data 通常为字符串（或模型原始文本内容）。
+
+### 5.5 自定义异常
+
+SilkLoom 提供了可直接导入的异常类型，便于业务层做精细化错误处理。
+
+- ConfigurationError：参数配置不合法（如 max_retries < 1）
+- InvalidInputError：输入类型不符合要求（如把单个字符串传给 map）
+- AsyncClientNotConfiguredError：调用异步方法但未配置 async 客户端
+- TemplateRenderError：Jinja2 模板渲染失败
+- ResponseParseError：结构化输出解析失败
+- LLMRequestError：底层请求失败（会在 TaskResult.error 中带类型前缀）
+
+```python
+from silkloom_core import PromptMapper, InvalidInputError, ConfigurationError
+
+try:
+    mapper = PromptMapper(model="gpt-4o-mini", user_prompt="{{ text }}", max_retries=0)
+except ConfigurationError as e:
+    print("配置错误:", e)
+
+try:
+    mapper = PromptMapper(model="gpt-4o-mini", user_prompt="{{ text }}")
+    mapper.map("单个字符串")
+except InvalidInputError as e:
+    print("输入错误:", e)
+```
 
 ## 许可证
 
 MIT
-

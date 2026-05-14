@@ -8,9 +8,27 @@ SilkLoom Core V4.1
 from .prompt_mapper import PromptMapper
 from .results import ResultSet
 from .types import TaskResult
+from .engine import CacheManager
+from .exceptions import (
+	SilkLoomError,
+	ConfigurationError,
+	InvalidInputError,
+	AsyncClientNotConfiguredError,
+	TemplateRenderError,
+	ResponseParseError,
+	LLMRequestError,
+)
 
 __all__ = [
 	"PromptMapper",
 	"ResultSet",
 	"TaskResult",
+	"CacheManager",
+	"SilkLoomError",
+	"ConfigurationError",
+	"InvalidInputError",
+	"AsyncClientNotConfiguredError",
+	"TemplateRenderError",
+	"ResponseParseError",
+	"LLMRequestError",
 ]
