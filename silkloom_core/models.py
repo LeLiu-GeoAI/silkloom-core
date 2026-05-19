@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Generic, Iterator, TypeVar
+from typing import Any, Generic, Iterator, List, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
@@ -8,35 +8,37 @@ T = TypeVar("T")
 
 
 class TaskResult(BaseModel, Generic[T]):
+    task_id: str
     is_success: bool
     data: T | None
     error: str | None
     input_data: dict[str, Any]
     raw_output: str | None
     reasoning: str | None
+    cached: bool = False
 
 
 class BatchResult(Generic[T]):
-    def __init__(self, items: list[TaskResult[T]]):
-        self._items = items
+    def __init__(self, results: List[TaskResult[T]]):
+        self.results = results
 
     def __len__(self) -> int:
-        return len(self._items)
+        return len(self.results)
 
     def __iter__(self) -> Iterator[TaskResult[T]]:
-        return iter(self._items)
+        return iter(self.results)
 
     def __getitem__(self, index: int) -> TaskResult[T]:
-        return self._items[index]
+        return self.results[index]
 
-    def successful(self) -> list[TaskResult[T]]:
-        return [item for item in self._items if item.is_success]
+    def successful(self) -> List[TaskResult[T]]:
+        return [item for item in self.results if item.is_success]
 
-    def failed(self) -> list[TaskResult[T]]:
-        return [item for item in self._items if not item.is_success]
+    def failed(self) -> List[TaskResult[T]]:
+        return [item for item in self.results if not item.is_success]
 
-    def to_dicts(self) -> list[dict[str, Any]]:
-        return [item.model_dump(mode="json") for item in self._items]
+    def to_dicts(self) -> List[dict[str, Any]]:
+        return [item.model_dump(mode="json") for item in self.results]
 
     def to_pandas(self):
         try:

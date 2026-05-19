@@ -1,23 +1,39 @@
-# SilkLoom Core 2.0 API 设计文档
+# 📚 SilkLoom Core 2.0 API 设计与架构指南
 
-## 1. 设计哲学 (Design Philosophy)
+## 1. 核心设计哲学 (Design Philosophy)
 
-SilkLoom Core 2.0 定位于极简的结构化多模态批处理引擎。
-对外，它坚持“一行代码跑通”的低心智负担体验，仅保留一套核心 API；对内，它通过高度解耦的流水线，默默为你处理并发调度、断点续跑、图片转换组装以及脏 JSON 自动修复（`json_repair`）等大模型工程痛点。
+SilkLoom Core 2.0 定位于**极简、高可用、结构化的大模型多模态批处理引擎**。
 
-核心边界：本引擎的输入范围严格收敛于纯文本与图片。
+* **对外：低心智负担。** 坚持“一行代码跑通”，仅保留一套核心 API。
+* **对内：工程痛点吞噬者。** 采用“计算与存储分离”的流水线，默默处理并发调度、断点续跑、图片转换组装，以及依赖 `json_repair` 的脏 JSON 自动挽救。
 
 ---
 
-## 2. 核心 API 参考
+## 2. 内部架构与数据流转 (Architecture & Pipeline)
 
-### 2.1 主引擎：`TaskLoom`
+为了实现“可并行、可中断、可异步”，引擎底层执行器遵循以下状态流转：
 
-系统的唯一入口。负责模板管理、输出模式定义与任务调度。
+1. **哈希指纹化 (Fingerprinting)**：引擎遍历输入序列，为每个输入字典生成 SHA-256 哈希值作为唯一 `Task ID`。
+2. **缓存拦截 (Cache Intercept)**：如果指定了 `task_name`，引擎会查询本地 SQLite 库，命中的任务直接标记成功，瞬间通过。
+3. **并发调度 (Worker Pool)**：未命中缓存的任务进入同步线程池 (`ThreadPoolExecutor`) 或异步任务组 (`asyncio.gather`)。
+4. **原子持久化 (Atomic Persist)**：任务一旦成功（含 JSON 修复），立刻原子级 `Upsert` 写入 SQLite WAL 模式缓存。无论外部环境如何崩溃，已完成数据绝对安全。
+5. **灵活消费 (Flexible Consumption)**：通过 `map`（阻塞重排组装）或 `stream`（流式实时释放）将结果交付给前端。
 
-**签名**
+---
+
+## 3. 核心 API 参考 (Core API Reference)
+
+### 3.1 主引擎：`TaskLoom`
+
+`TaskLoom` 是系统的唯一入口。支持作为上下文管理器（Context Manager）使用以自动释放底层连接资源。
 
 ```python
+from typing import Any, AsyncGenerator, Generator, Generic, Iterable, TypeVar
+from pydantic import BaseModel
+from silkloom_core import TaskResult, BatchResult
+
+T = TypeVar("T")
+
 class TaskLoom(Generic[T]):
     def __init__(
         self,
@@ -28,99 +44,127 @@ class TaskLoom(Generic[T]):
         auto_repair_json: bool = True,
         max_retries: int = 3,
         client: Any | None = None,
+        db_path: str = ".silkloom.db",
         **llm_kwargs: Any
     ): ...
+
+    def close(self): ...
+    
+    # 支持 Context Manager
+    def __enter__(self) -> "TaskLoom": ...
+    def __exit__(self, exc_type, exc_val, exc_tb): ...
+
 ```
 
-**参数说明**
+**核心参数说明：**
 
-* `model`: 模型名称（如 `"gpt-4o-mini"`、`"qwen-vl-plus"`）。
-* `prompt_template`: Jinja2 语法的用户提示词模板（如 `"分析这张图：{{ text }}"`）。仅渲染文本变量。
-* `system_prompt`: 可选的系统提示词。
-* `response_model`: 输出结构。
-  * `Pydantic BaseModel`：执行 JSON 提取与修复，返回强类型对象。
-  * `dict`：执行 JSON 提取与修复，返回纯字典。
-  * `None`：返回模型原始文本。
-* `auto_repair_json`: 默认 `True`，通过 `json_repair` 自动挽救模型输出的非标准或残缺 JSON。
-* `max_retries`: 单条任务失败时的最大重试次数。
-* `client`: 兼容 OpenAI API 规范的客户端实例。
-* `llm_kwargs`: 透传给底层大模型的参数（如 `temperature`、`top_p`）。
-
-### 2.2 多模态输入契约 (Input Protocol)
-
-`TaskLoom` 的执行方法（`process` / `map`）接受的数据源为 `dict` 或 `dict` 的集合。
-
-引擎内部约定了特殊保留字段 `images`：
-
-* 文本变量：字典中除 `images` 外的键，均视为 Jinja2 变量，参与 `prompt_template` 的渲染。
-* 图片变量：字典中的 `images: list[str]` 字段。内部 `MessageBuilder` 会自动拦截此字段，支持传入本地路径（自动转 Base64）、URL 或 Data URI，并自动组装为大模型支持的多模态消息结构。
-
-### 2.3 执行方法 (Execution)
-
-* `process(data: str | dict) -> TaskResult[T]`
-  同步单条执行。输入纯字符串会自动等价于 `{"text": ...}`。
-* `aprocess(data: str | dict) -> TaskResult[T]`
-  异步单条执行。
-* `map(sequence: Iterable[str | dict], db_path: str = ".silkloom.db", run_id: str | None = None, workers: int = 5, show_progress: bool = False, progress_desc: str = "TaskLoom map", progress_callback: Callable[[int, int, dict[str, Any], TaskResult[T] | None, str], Any] | None = None) -> BatchResult[T]`
-  同步批处理。传入 `run_id` 即启用 SQLite 缓存，支持断点续跑，自动跳过已成功任务。
-* `amap(sequence: Iterable[str | dict], db_path: str = ".silkloom.db", run_id: str | None = None, max_concurrent: int = 5, show_progress: bool = False, progress_desc: str = "TaskLoom amap", progress_callback: Callable[[int, int, dict[str, Any], TaskResult[T] | None, str], Any] | None = None) -> BatchResult[T]`
-  异步批处理。
-
-如果你希望在批处理中显示进度条，先安装可选依赖：
-
-```bash
-pip install silkloom-core[progress]
-```
-
-然后在调用时显式开启：
-
-```python
-results = loom.map(
-    items,
-    run_id="cv_parse_v1",
-    show_progress=True,
-    progress_desc="解析简历",
-)
-```
-
-如果你在 Gradio 中想显示更细的状态文案，可以用 `progress_callback` 自定义：
-
-```python
-def on_progress(completed, total, input_data, result, status_text):
-    print(status_text)
-
-results = loom.map(
-    items,
-    progress_callback=on_progress,
-)
-```
-
-### 2.4 数据模型 (Data Models)
-
-**`TaskResult[T]`**（单条任务快照）
-
-```python
-class TaskResult(BaseModel, Generic[T]):
-    is_success: bool          # 是否成功
-    data: T | None            # 解析后的核心数据（Pydantic 对象 / Dict / Str）
-    error: str | None         # 错误信息堆栈
-    input_data: dict          # 原始输入
-    raw_output: str | None    # 大模型返回的原始文本
-    reasoning: str | None     # 推理过程（如 DeepSeek/Qwen 的  Witticism 标签内容）
-```
-
-**`BatchResult[T]`**（批处理结果集，按输入顺序对齐）
-
-* 提供 `.successful()` / `.failed()` 快捷过滤。
-* 提供 `.to_dicts()` / `.to_pandas()` 快捷导出。
+* `response_model`: 决定输出形态。传入 `Pydantic 模型` 返回强类型对象；传入 `dict` 返回字典；传入 `None` 返回原始文本。
+* `prompt_template`: Jinja2 语法的提示词模板（如 `"分析：{{ text }}"`）。
 
 ---
 
-## 3. 典型应用范例
+### 3.2 数据模型 (Data Models)
 
-### 场景一：纯文本 + Pydantic 严谨抽取
+**单条快照：`TaskResult[T]**`
 
-文本数据通过 Jinja2 渲染，底层利用 `json_repair` 兜底，最终输出结构化对象。
+```python
+class TaskResult(BaseModel, Generic[T]):
+    task_id: str              # 根据输入内容生成的唯一 Hash 指纹
+    is_success: bool          # 任务是否成功解析
+    data: T | None            # 最终结构化数据 (Pydantic实例 / Dict / Str)
+    error: str | None         # 异常堆栈 (仅失败时存在)
+    input_data: dict          # 触发该任务的原始输入字典
+    raw_output: str | None    # 大模型返回的原始字符串 (供脏数据兜底排查)
+    reasoning: str | None     # 模型推理过程 (如 DeepSeek <think>)
+    cached: bool              # 标识该结果是否来自于 SQLite 缓存
+
+```
+
+**批次集合：`BatchResult[T]**` (仅 `map/amap` 返回)
+
+```python
+class BatchResult(Generic[T]):
+    results: list[TaskResult[T]]
+    
+    def successful(self) -> list[TaskResult[T]]: ...
+    def failed(self) -> list[TaskResult[T]]: ...
+    def to_pandas(self) -> "pd.DataFrame": ...  # 自动展平 data 导出
+
+```
+
+---
+
+### 3.3 执行模式 (Execution Matrix)
+
+所有输入数据源（`data` / `sequence`）统一接受 **`dict` 或 `dict` 的集合**。包含 `images` 键时自动触发多模态逻辑。
+
+#### 1. 单例执行 (Single)
+
+适用于即时问答或单条测试。
+
+```python
+def process(self, data: str | dict) -> TaskResult[T]: ...
+async def aprocess(self, data: str | dict) -> TaskResult[T]: ...
+
+```
+
+#### 2. 阻塞批处理 (Blocking Batch)
+
+适用于后台脚本或定时任务。等待所有任务跑完后一次性返回汇总结果。**默认保证返回顺序与输入顺序完全一致。**
+
+```python
+def map(
+    self, 
+    sequence: Iterable[str | dict], 
+    task_name: str | None = None, 
+    max_workers: int = 5
+) -> BatchResult[T]: ...
+
+async def amap(
+    self, 
+    sequence: Iterable[str | dict], 
+    task_name: str | None = None, 
+    max_workers: int = 5
+) -> BatchResult[T]: ...
+
+```
+
+#### 3. 流式批处理 (Streaming Batch) - ✨ 核心高阶 API
+
+适用于前端 UI（Gradio / Streamlit）或响应式 API。**极低内存占用，按完成状态实时 Yield**。
+
+```python
+def stream(
+    self, 
+    sequence: Iterable[str | dict], 
+    task_name: str | None = None, 
+    max_workers: int = 5,
+    ordered: bool = False
+) -> Generator[TaskResult[T], None, None]: ...
+
+async def astream(
+    self, 
+    sequence: Iterable[str | dict], 
+    task_name: str | None = None, 
+    max_workers: int = 5,
+    ordered: bool = False
+) -> AsyncGenerator[TaskResult[T], None]: ...
+
+```
+
+> **关于 `ordered` 参数：**
+> * `ordered=False` (默认)：先处理完的任务先返回。速度最快，UI 响应体验最佳。
+> * `ordered=True`：内部建立缓冲队列，严格按 `sequence` 的原顺序阻塞 Yield。
+> 
+> 
+
+---
+
+## 4. 典型应用范例 (Best Practices)
+
+### 场景一：纯文本结构化抽取 (Pydantic 兜底)
+
+文本数据通过 Jinja2 渲染，底层自动执行校验与重试。
 
 ```python
 from pydantic import BaseModel
@@ -130,62 +174,108 @@ class UserProfile(BaseModel):
     name: str
     skills: list[str]
 
-loom = TaskLoom(
+with TaskLoom(
     model="gpt-4o-mini",
     prompt_template="提取简历中的信息：{{ text }}",
     response_model=UserProfile,
-)
+) as loom:
 
-# 纯文本列表，自动包装为 {"text": ...}
-results = loom.map(
-    ["我是张三，精通 Python 和 Java", "李四，会前端和设计"],
-    run_id="cv_parse_v1"  # 开启断点续跑
-)
+    # 自动开启缓存与断点续跑机制
+    results = loom.map(
+        [{"text": "张三精通 Python"}, {"text": "李四会设计"}], 
+        task_name="cv_parse_v1",
+        max_workers=5
+    )
 
-print(results[0].data.name)   # "张三"
-print(results[0].data.skills) # ["Python", "Java"]
+    print(results.successful()[0].data.skills) # ["Python"]
+
 ```
 
-### 场景二：图片识别 + 字典灵活提取（图文多模态）
+### 场景二：多模态图像批处理
 
-传入 `images` 字段，底层自动将本地图片转码并与渲染后的文本组装，无需定义 Pydantic 类，直接输出字典。
+引擎自动拦截 `images` 字段，完成本地图片转码/远程图片拉取，组装为大模型支持的复杂协议。
 
 ```python
-from silkloom_core import TaskLoom
-
 loom = TaskLoom(
-    model="qwen-vl-max",  # 或 gpt-4o 等多模态模型
-    prompt_template="请根据我的要求分析这张图片。用户要求：{{ instruction }}",
+    model="qwen-vl-max", 
+    prompt_template="根据要求分析图片：{{ instruction }}",
     response_model=dict,
 )
 
 result = loom.process({
-    "instruction": "提取图中的菜名和总价，用 JSON 返回",
+    "instruction": "提取图中的菜名和总价",
     "images": [
-        "./receipt_01.jpg",               # 引擎内部自动读取并转 Base64
+        "./receipt_01.jpg",               # 自动读取并转 Base64
         "https://example.com/menu.png"    # URL 直接透传
     ]
 })
 
-if result.is_success:
-    print(result.data.get("总价"))
 ```
 
-### 场景三：异常捕获与脏数据排查
+### 场景三：Gradio 流式渲染与断点续跑 (UI 融合)
 
-如果遇到极其混乱的模型输出，连 `json_repair` 都无法挽救，SilkLoom 会将原始信息原样保留在结果中，供开发者排查。
+利用 `stream`，哪怕网页中途关闭，已跑完的数据早已安全落库。再次点击瞬间完成缓存加载，进度条无缝续接。
 
 ```python
-failed_tasks = results.failed()
+import gradio as gr
+from silkloom_core import TaskLoom
 
-for task in failed_tasks:
-    print(f"失败原因: {task.error}")
-    print(f"导致失败的原始输入: {task.input_data}")
-    print(f"大模型的胡言乱语: {task.raw_output}")
+loom = TaskLoom(
+    model="deepseek-chat",
+    prompt_template="总结论文核心方法：{{ text }}",
+    response_model=dict
+)
+
+def process_papers(papers_list, progress=gr.Progress()):
+    total = len(papers_list)
+    results_list = []
+    
+    # stream(ordered=False) 保证最快的视觉反馈
+    generator = loom.stream(
+        sequence=papers_list,
+        task_name="gradio_paper_batch_v1",  # 开启容灾缓存
+        max_workers=10
+    )
+    
+    for i, task in enumerate(generator, 1):
+        status = "✅ 成功" if task.is_success else "❌ 失败"
+        progress(i / total, desc=f"进度: {i}/{total} | 最新: {status}")
+        
+        results_list.append({
+            "处理状态": status,
+            "提取数据": task.data,
+            "缓存命中": task.cached
+        })
+        
+        # 实时逐行更新 UI 表格
+        yield results_list
+
 ```
 
----
+### 场景四：FastAPI 异步 SSE 实时推送
 
-### 架构侧的设计收益总结
+在现代后端架构中，使用 `astream` 释放 ASGI 容器的最高并发性能。
 
-通过明确只支持文字和图片，你的引擎内部 `MessageBuilder` 逻辑将变得极其收敛和稳定，只需处理 Base64 图片的通用函数，不再面对各大模型乱七八糟的 File API 兼容问题，这让包的代码体积可以控制在极小的范围内。
+```python
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+import json
+
+app = FastAPI()
+loom = TaskLoom(
+    model="gpt-4o-mini",
+    prompt_template="提取发票关键信息：{{ text }}",
+    response_model=dict
+)
+
+@app.post("/api/batch_extract")
+async def batch_extract(payload: list[dict]):
+    
+    async def event_stream():
+        # 充分利用 asyncio 的并发调度机制
+        async for task in loom.astream(payload, task_name="invoice_prod", max_workers=20):
+            yield f"data: {json.dumps(task.model_dump())}\n\n"
+            
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+```
