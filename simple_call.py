@@ -211,6 +211,64 @@ async def run_all_tests(client: OpenAI) -> None:
         print(f"[process_image] skipped or failed: {exc}")
 
 
+    # ------------------------- 额外示例（可按需运行） -------------------------
+    def demo_context_manager(client: OpenAI) -> None:
+        """示例：以 context manager 方式使用 TaskLoom，并演示 response_model 与缓存配置。"""
+        print_section("demo: context manager + cache")
+        from pydantic import BaseModel
+
+        class Simple(BaseModel):
+            text: str
+
+        with TaskLoom(
+            model="glm-4-flash",
+            prompt_template="{{text}}",
+            response_model=dict,
+            client=client,
+            db_path=".silkloom.demo.db",
+        ) as loom:
+            seq = [{"text": "示例一"}, {"text": "示例二"}]
+            for res in loom.stream(seq, task_name="demo_ctx_v1", max_workers=2, ordered=False):
+                print_task_result("demo_ctx", res)
+
+
+    def demo_stream(client: OpenAI) -> None:
+        """示例：阻塞流式调用 `stream`，展示 ordered=True/False 的差异。"""
+        print_section("demo: stream ordered vs unordered")
+        loom = TaskLoom(model="glm-4-flash", prompt_template="{{text}}", client=client)
+        seq = [{"text": "1"}, {"text": "2"}, {"text": "3"}]
+
+        print("-- unordered (最快完成优先) --")
+        for r in loom.stream(seq, max_workers=3, ordered=False):
+            print_task_result("stream_unordered", r)
+
+        print("-- ordered (按输入顺序) --")
+        for r in loom.stream(seq, max_workers=3, ordered=True):
+            print_task_result("stream_ordered", r)
+
+
+    def demo_image_handling(client: OpenAI) -> None:
+        """示例：多模态图片输入自动转 base64 或透传 URL。"""
+        print_section("demo: image handling")
+        loom = TaskLoom(model="glm-4v-flash", prompt_template="{{instruction}}", response_model=dict, client=client)
+        res = loom.process({
+            "instruction": "请返回包含 scene 字段的 JSON。",
+            "images": [
+                "https://images.unsplash.com/photo-1469474968028-56623f02e42e",
+            ],
+        })
+        print_task_result("image_demo", res)
+
+
+    async def demo_astream(client: OpenAI) -> None:
+        """示例：异步流式 astream 的基本用法。"""
+        print_section("demo: astream (async)")
+        loom = TaskLoom(model="glm-4-flash", prompt_template="{{text}}", client=client)
+        seq = [{"text": "A1"}, {"text": "A2"}, {"text": "A3"}]
+        async for item in loom.astream(seq, max_workers=3, ordered=False):
+            print_task_result("astream", item)
+
+
 def main() -> None:
     load_env_file()
 
