@@ -111,7 +111,7 @@ async def test_aprocess_raw(client: OpenAI) -> None:
 def test_map_and_cache(client: OpenAI) -> None:
     print_section("map + cache")
     db_path = ".silkloom.test.db"
-    run_id = "map_interface_test_v1"
+    task_name = "map_interface_test_v1"
     sequence = [
         "第一条：请改写为正式语气。",
         "第二条：请改写为正式语气。",
@@ -122,15 +122,15 @@ def test_map_and_cache(client: OpenAI) -> None:
         model="glm-4-flash",
         prompt_template="{{ text }}",
         client=client,
+        db_path=db_path,
         temperature=0.2,
     )
-
     t1 = time.perf_counter()
-    first = loom.map(sequence, db_path=db_path, run_id=run_id, workers=3)
+    first = loom.map(sequence, task_name=task_name, max_workers=3)
     t2 = time.perf_counter()
 
     t3 = time.perf_counter()
-    second = loom.map(sequence, db_path=db_path, run_id=run_id, workers=3)
+    second = loom.map(sequence, task_name=task_name, max_workers=3)
     t4 = time.perf_counter()
 
     print(f"[map] first_run_count={len(first)}, success={len(first.successful())}, failed={len(first.failed())}")
@@ -148,7 +148,7 @@ def test_map_and_cache(client: OpenAI) -> None:
 async def test_amap_and_cache(client: OpenAI) -> None:
     print_section("amap + cache")
     db_path = ".silkloom.test.async.db"
-    run_id = "amap_interface_test_v1"
+    task_name = "amap_interface_test_v1"
     sequence = [
         "A1: 转为更正式语气",
         "A2: 转为更正式语气",
@@ -159,15 +159,16 @@ async def test_amap_and_cache(client: OpenAI) -> None:
         model="glm-4-flash",
         prompt_template="{{ text }}",
         client=client,
+        db_path=db_path,
         temperature=0.2,
     )
 
     t1 = time.perf_counter()
-    first = await loom.amap(sequence, db_path=db_path, run_id=run_id, max_concurrent=3)
+    first = await loom.amap(sequence, task_name=task_name, max_concurrent=3)
     t2 = time.perf_counter()
 
     t3 = time.perf_counter()
-    second = await loom.amap(sequence, db_path=db_path, run_id=run_id, max_concurrent=3)
+    second = await loom.amap(sequence, task_name=task_name, max_concurrent=3)
     t4 = time.perf_counter()
 
     print(f"[amap] first_run_count={len(first)}, success={len(first.successful())}, failed={len(first.failed())}")

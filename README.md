@@ -114,17 +114,17 @@ async def aprocess(self, data: str | dict) -> TaskResult[T]: ...
 
 ```python
 def map(
-    self, 
-    sequence: Iterable[str | dict], 
-    task_name: str | None = None, 
-    max_workers: int = 5
+    self,
+    sequence: Iterable[str | dict],
+    task_name: str | None = None,
+    max_workers: int = 5,
 ) -> BatchResult[T]: ...
 
 async def amap(
-    self, 
-    sequence: Iterable[str | dict], 
-    task_name: str | None = None, 
-    max_workers: int = 5
+    self,
+    sequence: Iterable[str | dict],
+    task_name: str | None = None,
+    max_workers: int = 5,
 ) -> BatchResult[T]: ...
 
 ```
@@ -135,19 +135,19 @@ async def amap(
 
 ```python
 def stream(
-    self, 
-    sequence: Iterable[str | dict], 
-    task_name: str | None = None, 
+    self,
+    sequence: Iterable[str | dict],
+    task_name: str | None = None,
     max_workers: int = 5,
-    ordered: bool = False
+    ordered: bool = False,
 ) -> Generator[TaskResult[T], None, None]: ...
 
 async def astream(
-    self, 
-    sequence: Iterable[str | dict], 
-    task_name: str | None = None, 
+    self,
+    sequence: Iterable[str | dict],
+    task_name: str | None = None,
     max_workers: int = 5,
-    ordered: bool = False
+    ordered: bool = False,
 ) -> AsyncGenerator[TaskResult[T], None]: ...
 
 ```
