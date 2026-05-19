@@ -61,10 +61,39 @@ class TaskLoom(Generic[T]):
   同步单条执行。输入纯字符串会自动等价于 `{"text": ...}`。
 * `aprocess(data: str | dict) -> TaskResult[T]`
   异步单条执行。
-* `map(sequence: Iterable[str | dict], db_path: str = ".silkloom.db", run_id: str | None = None, workers: int = 5) -> BatchResult[T]`
+* `map(sequence: Iterable[str | dict], db_path: str = ".silkloom.db", run_id: str | None = None, workers: int = 5, show_progress: bool = False, progress_desc: str = "TaskLoom map", progress_callback: Callable[[int, int, dict[str, Any], TaskResult[T] | None, str], Any] | None = None) -> BatchResult[T]`
   同步批处理。传入 `run_id` 即启用 SQLite 缓存，支持断点续跑，自动跳过已成功任务。
-* `amap(sequence: Iterable[str | dict], db_path: str = ".silkloom.db", run_id: str | None = None, max_concurrent: int = 5) -> BatchResult[T]`
+* `amap(sequence: Iterable[str | dict], db_path: str = ".silkloom.db", run_id: str | None = None, max_concurrent: int = 5, show_progress: bool = False, progress_desc: str = "TaskLoom amap", progress_callback: Callable[[int, int, dict[str, Any], TaskResult[T] | None, str], Any] | None = None) -> BatchResult[T]`
   异步批处理。
+
+如果你希望在批处理中显示进度条，先安装可选依赖：
+
+```bash
+pip install silkloom-core[progress]
+```
+
+然后在调用时显式开启：
+
+```python
+results = loom.map(
+    items,
+    run_id="cv_parse_v1",
+    show_progress=True,
+    progress_desc="解析简历",
+)
+```
+
+如果你在 Gradio 中想显示更细的状态文案，可以用 `progress_callback` 自定义：
+
+```python
+def on_progress(completed, total, input_data, result, status_text):
+    print(status_text)
+
+results = loom.map(
+    items,
+    progress_callback=on_progress,
+)
+```
 
 ### 2.4 数据模型 (Data Models)
 
@@ -77,7 +106,7 @@ class TaskResult(BaseModel, Generic[T]):
     error: str | None         # 错误信息堆栈
     input_data: dict          # 原始输入
     raw_output: str | None    # 大模型返回的原始文本
-    reasoning: str | None     # 推理过程（如 DeepSeek/Qwen 的 <think> 标签内容）
+    reasoning: str | None     # 推理过程（如 DeepSeek/Qwen 的  Witticism 标签内容）
 ```
 
 **`BatchResult[T]`**（批处理结果集，按输入顺序对齐）

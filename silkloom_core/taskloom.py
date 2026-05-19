@@ -4,8 +4,9 @@ import asyncio
 import inspect
 import json
 import traceback
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Generic, Iterable, TypeVar
+from typing import Any, Callable, Generic, Iterable, TypeVar
 
 from openai import AsyncOpenAI, OpenAI
 from pydantic import BaseModel
@@ -16,6 +17,7 @@ from .message_builder import MessageBuilder
 from .models import BatchResult, TaskResult
 
 T = TypeVar("T")
+BatchProgressCallback = Callable[[int, int, dict[str, Any], TaskResult[T] | None, str], Any]
 
 
 class TaskLoom(Generic[T]):
@@ -54,6 +56,9 @@ class TaskLoom(Generic[T]):
         db_path: str = ".silkloom.db",
         run_id: str | None = None,
         workers: int = 5,
+        show_progress: bool = False,
+        progress_desc: str = "TaskLoom map",
+        progress_callback: BatchProgressCallback[T] | None = None,
     ) -> BatchResult[T]:
         inputs = [self._normalize_input(item) for item in sequence]
         results: list[TaskResult[T] | None] = [None] * len(inputs)
@@ -61,29 +66,56 @@ class TaskLoom(Generic[T]):
         cache = SQLiteCache(db_path) if run_id else None
         pending: list[tuple[int, dict[str, Any], str]] = []
 
-        for idx, input_data in enumerate(inputs):
-            input_key = hash_input(input_data)
-            if cache and run_id:
-                cached = cache.get(run_id, input_key)
-                if cached is not None:
-                    results[idx] = self._deserialize_task_result(cached)
-                    continue
-            pending.append((idx, input_data, input_key))
+        progress_context = self._progress_context(len(inputs), show_progress, progress_desc)
+        with progress_context as progress_bar:
+            for idx, input_data in enumerate(inputs):
+                input_key = hash_input(input_data)
+                if cache and run_id:
+                    cached = cache.get(run_id, input_key)
+                    if cached is not None:
+                        task_result = self._deserialize_task_result(cached)
+                        results[idx] = task_result
+                        completed_count = sum(item is not None for item in results)
+                        status_text = self._build_progress_text(completed_count, len(inputs), input_data, task_result)
+                        self._emit_progress_callback(
+                            progress_callback,
+                            completed_count,
+                            len(inputs),
+                            input_data,
+                            task_result,
+                            status_text,
+                        )
+                        if progress_bar is not None:
+                            progress_bar.update(1)
+                        continue
+                pending.append((idx, input_data, input_key))
 
-        if pending:
-            with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-                future_map = {
-                    executor.submit(self._process_with_retries, input_data): (idx, input_key, input_data)
-                    for idx, input_data, input_key in pending
-                }
+            if pending:
+                with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+                    future_map = {
+                        executor.submit(self._process_with_retries, input_data): (idx, input_key, input_data)
+                        for idx, input_data, input_key in pending
+                    }
 
-                for future in as_completed(future_map):
-                    idx, input_key, _ = future_map[future]
-                    task_result = future.result()
-                    results[idx] = task_result
+                    for future in as_completed(future_map):
+                        idx, input_key, _ = future_map[future]
+                        task_result = future.result()
+                        results[idx] = task_result
+                        completed_count = sum(item is not None for item in results)
+                        status_text = self._build_progress_text(completed_count, len(inputs), inputs[idx], task_result)
 
-                    if cache and run_id and task_result.is_success:
-                        cache.set(run_id, input_key, task_result.model_dump_json())
+                        if cache and run_id and task_result.is_success:
+                            cache.set(run_id, input_key, task_result.model_dump_json())
+                        self._emit_progress_callback(
+                            progress_callback,
+                            completed_count,
+                            len(inputs),
+                            inputs[idx],
+                            task_result,
+                            status_text,
+                        )
+                        if progress_bar is not None:
+                            progress_bar.update(1)
 
         return BatchResult([item for item in results if item is not None])
 
@@ -93,6 +125,9 @@ class TaskLoom(Generic[T]):
         db_path: str = ".silkloom.db",
         run_id: str | None = None,
         max_concurrent: int = 5,
+        show_progress: bool = False,
+        progress_desc: str = "TaskLoom amap",
+        progress_callback: BatchProgressCallback[T] | None = None,
     ) -> BatchResult[T]:
         inputs = [self._normalize_input(item) for item in sequence]
         results: list[TaskResult[T] | None] = [None] * len(inputs)
@@ -100,25 +135,52 @@ class TaskLoom(Generic[T]):
         cache = SQLiteCache(db_path) if run_id else None
         pending: list[tuple[int, dict[str, Any], str]] = []
 
-        for idx, input_data in enumerate(inputs):
-            input_key = hash_input(input_data)
-            if cache and run_id:
-                cached = cache.get(run_id, input_key)
-                if cached is not None:
-                    results[idx] = self._deserialize_task_result(cached)
-                    continue
-            pending.append((idx, input_data, input_key))
+        progress_context = self._progress_context(len(inputs), show_progress, progress_desc)
+        with progress_context as progress_bar:
+            for idx, input_data in enumerate(inputs):
+                input_key = hash_input(input_data)
+                if cache and run_id:
+                    cached = cache.get(run_id, input_key)
+                    if cached is not None:
+                        task_result = self._deserialize_task_result(cached)
+                        results[idx] = task_result
+                        completed_count = sum(item is not None for item in results)
+                        status_text = self._build_progress_text(completed_count, len(inputs), input_data, task_result)
+                        self._emit_progress_callback(
+                            progress_callback,
+                            completed_count,
+                            len(inputs),
+                            input_data,
+                            task_result,
+                            status_text,
+                        )
+                        if progress_bar is not None:
+                            progress_bar.update(1)
+                        continue
+                pending.append((idx, input_data, input_key))
 
-        semaphore = asyncio.Semaphore(max(1, max_concurrent))
+            semaphore = asyncio.Semaphore(max(1, max_concurrent))
 
-        async def _run_one(idx: int, input_data: dict[str, Any], input_key: str) -> None:
-            async with semaphore:
-                task_result = await self._aprocess_with_retries(input_data)
-            results[idx] = task_result
-            if cache and run_id and task_result.is_success:
-                cache.set(run_id, input_key, task_result.model_dump_json())
+            async def _run_one(idx: int, input_data: dict[str, Any], input_key: str) -> None:
+                async with semaphore:
+                    task_result = await self._aprocess_with_retries(input_data)
+                results[idx] = task_result
+                completed_count = sum(item is not None for item in results)
+                status_text = self._build_progress_text(completed_count, len(inputs), input_data, task_result)
+                if cache and run_id and task_result.is_success:
+                    cache.set(run_id, input_key, task_result.model_dump_json())
+                self._emit_progress_callback(
+                    progress_callback,
+                    completed_count,
+                    len(inputs),
+                    input_data,
+                    task_result,
+                    status_text,
+                )
+                if progress_bar is not None:
+                    progress_bar.update(1)
 
-        await asyncio.gather(*[_run_one(idx, inp, key) for idx, inp, key in pending])
+            await asyncio.gather(*[_run_one(idx, inp, key) for idx, inp, key in pending])
 
         return BatchResult([item for item in results if item is not None])
 
@@ -128,6 +190,47 @@ class TaskLoom(Generic[T]):
         if isinstance(data, dict):
             return data
         raise TypeError("Input data must be str or dict")
+
+    def _progress_context(self, total: int, enabled: bool, desc: str):
+        if not enabled:
+            return nullcontext(None)
+
+        try:
+            from tqdm.auto import tqdm
+        except ImportError as exc:
+            raise ImportError("tqdm is required for progress bars, install silkloom-core[progress]") from exc
+
+        return tqdm(total=total, desc=desc)
+
+    def _build_progress_text(
+        self,
+        completed: int,
+        total: int,
+        input_data: dict[str, Any],
+        task_result: TaskResult[T],
+    ) -> str:
+        prefix = "处理完成" if task_result.is_success else "处理失败"
+        text = input_data.get("text")
+        if isinstance(text, str) and text.strip():
+            preview = text.strip().replace("\n", " ")[:48]
+            if len(text.strip()) > 48:
+                preview += "..."
+            return f"{prefix} 第 {completed}/{total} 篇：{preview}"
+        return f"{prefix} 第 {completed}/{total} 项"
+
+    def _emit_progress_callback(
+        self,
+        progress_callback: BatchProgressCallback[T] | None,
+        completed: int,
+        total: int,
+        input_data: dict[str, Any],
+        task_result: TaskResult[T],
+        status_text: str,
+    ) -> None:
+        if progress_callback is None:
+            return
+
+        progress_callback(completed, total, input_data, task_result, status_text)
 
     def _process_with_retries(self, input_data: dict[str, Any]) -> TaskResult[T]:
         last_error: str | None = None
