@@ -15,6 +15,8 @@ SilkLoom Core 3.0 定位于**极简、高可用、结构化的大模型多模态
 
 1. **哈希指纹化 (Fingerprinting)**：引擎遍历输入序列，为每个输入字典生成 SHA-256 哈希值作为唯一 `Task ID`。
 2. **缓存拦截 (Cache Intercept)**：如果指定了 `task_name`，引擎会查询本地 SQLite 库，命中的任务直接标记成功，瞬间通过。
+   
+    注意：为保证结果语义一致性，缓存键不仅基于输入内容，还包含会影响模型输出的运行时参数：`prompt_template`、`system_prompt`、`model`、`response_model` 的结构签名（Pydantic 模型字段指纹），以及经过清洗后的 `llm_kwargs`（会过滤回调/可调用对象并做稳定排序和序列化）。因此当提示词、响应模型或关键 LLM 参数发生变化时，旧缓存不会被错误命中。
 3. **并发调度 (Worker Pool)**：未命中缓存的任务进入同步线程池 (`ThreadPoolExecutor`) 或异步任务组 (`asyncio.gather`)。
 4. **原子持久化 (Atomic Persist)**：任务一旦成功（含 JSON 修复），立刻原子级 `Upsert` 写入 SQLite WAL 模式缓存。无论外部环境如何崩溃，已完成数据绝对安全。
 5. **灵活消费 (Flexible Consumption)**：通过 `map`（阻塞重排组装）或 `stream`（流式实时释放）将结果交付给前端。

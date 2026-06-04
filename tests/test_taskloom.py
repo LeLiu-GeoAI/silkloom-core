@@ -56,12 +56,30 @@ class FakeClient:
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=FakeChat(responses, delays).create))
 
 
+class CloseTrackingClient(FakeClient):
+    def __init__(self, responses=None, delays=None):
+        super().__init__(responses or ["ok"], delays)
+        self.close_count = 0
+
+    def close(self):
+        self.close_count += 1
+
+
 def test_process_returns_raw_when_no_response_model():
     client = FakeClient(["plain text output"])
     loom = TaskLoom(model="x", prompt_template="{{text}}", client=client)
     res = loom.process({"text": "hello"})
     assert res.is_success
     assert res.data == "plain text output"
+
+
+def test_context_manager_closes_client():
+    client = CloseTrackingClient()
+
+    with TaskLoom(model="x", prompt_template="{{text}}", client=client) as loom:
+        assert loom.client is client
+
+    assert client.close_count == 1
 
 
 def test_process_parses_json_and_pydantic(tmp_path):

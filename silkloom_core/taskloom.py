@@ -40,9 +40,96 @@ class TaskLoom(Generic[T]):
         self.llm_kwargs = llm_kwargs
         self._message_builder = MessageBuilder(prompt_template, system_prompt)
         self.db_path = db_path
+        self.prompt_template = prompt_template
+        self.system_prompt = system_prompt
 
-        self._sync_client = client or OpenAI()
+        self.client = client or OpenAI()
+        self._sync_client = self.client
         self._async_client = AsyncOpenAI() if client is None else client
+
+    def close(self):
+        seen: set[int] = set()
+        for client in (self.client, self._sync_client, self._async_client):
+            if client is None:
+                continue
+
+            client_id = id(client)
+            if client_id in seen:
+                continue
+            seen.add(client_id)
+
+            close_method = getattr(client, "close", None)
+            if callable(close_method):
+                close_method()
+                continue
+
+            aclose_method = getattr(client, "aclose", None)
+            if callable(aclose_method):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    asyncio.run(aclose_method())
+                else:
+                    loop.create_task(aclose_method())
+
+    def __enter__(self) -> "TaskLoom[T]":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+    def _response_model_fingerprint(self) -> object:
+        """Return a deterministic representation of response_model suitable for hashing."""
+        if self.response_model is None:
+            return None
+
+        if isinstance(self.response_model, type) and issubclass(self.response_model, BaseModel):
+            # Try pydantic v2 model_fields first, fallback to v1 __fields__
+            fields = getattr(self.response_model, "model_fields", None)
+            if fields is None:
+                raw = getattr(self.response_model, "__fields__", {})
+                items = [(k, getattr(v, "type_", getattr(v, "outer_type_", str(v)))) for k, v in raw.items()]
+            else:
+                items = []
+                for k, v in fields.items():
+                    try:
+                        # FieldInfo or similar: use annotation if available
+                        ann = v.annotation if hasattr(v, "annotation") else str(v)
+                    except Exception:
+                        ann = str(v)
+                    items.append((k, str(ann)))
+
+            return {"pydantic_model": self.response_model.__name__, "fields": sorted(items)}
+
+        return repr(self.response_model)
+
+    def _sanitized_llm_kwargs(self) -> object:
+        """Return a deterministic, JSON-serializable representation of llm_kwargs,
+        filtering out callables and unserializable objects."""
+        safe: dict = {}
+        for k, v in sorted(self.llm_kwargs.items()):
+            if callable(v):
+                continue
+            try:
+                # ensure deterministic JSON encoding
+                json.dumps(v, default=str, sort_keys=True, ensure_ascii=False)
+                safe[k] = v
+            except Exception:
+                safe[k] = str(v)
+
+        # Return as JSON-loaded object to ensure stable types (e.g., tuples->lists)
+        return json.loads(json.dumps(safe, default=str, sort_keys=True, ensure_ascii=False))
+
+    def _cache_payload(self, input_data: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "input": input_data,
+            "prompt_template": self.prompt_template,
+            "system_prompt": self.system_prompt,
+            "model": self.model,
+            "response_model": self._response_model_fingerprint(),
+            "llm_kwargs": self._sanitized_llm_kwargs(),
+        }
 
     def process(self, data: str | dict) -> TaskResult[T]:
         input_data = self._normalize_input(data)
@@ -70,7 +157,12 @@ class TaskLoom(Generic[T]):
         progress_context = self._progress_context(len(inputs), show_progress, progress_desc)
         with progress_context as progress_bar:
             for idx, input_data in enumerate(inputs):
-                input_key = hash_input(input_data)
+                resp_repr = (
+                    self.response_model.__name__
+                    if isinstance(self.response_model, type)
+                    else repr(self.response_model)
+                )
+                input_key = hash_input(self._cache_payload(input_data))
                 if cache and task_name:
                     cached = cache.get(task_name, input_key)
                     if cached is not None:
@@ -138,7 +230,12 @@ class TaskLoom(Generic[T]):
         progress_context = self._progress_context(len(inputs), show_progress, progress_desc)
         with progress_context as progress_bar:
             for idx, input_data in enumerate(inputs):
-                input_key = hash_input(input_data)
+                resp_repr = (
+                    self.response_model.__name__
+                    if isinstance(self.response_model, type)
+                    else repr(self.response_model)
+                )
+                input_key = hash_input(self._cache_payload(input_data))
                 if cache and task_name:
                     cached = cache.get(task_name, input_key)
                     if cached is not None:
@@ -197,7 +294,7 @@ class TaskLoom(Generic[T]):
 
         pending: list[Tuple[int, dict[str, Any], str]] = []
         for idx, input_data in enumerate(inputs):
-            input_key = hash_input(input_data)
+            input_key = hash_input(self._cache_payload(input_data))
             if cache and task_name:
                 cached = cache.get(task_name, input_key)
                 if cached is not None:
@@ -250,7 +347,7 @@ class TaskLoom(Generic[T]):
 
         pending: list[Tuple[int, dict[str, Any], str]] = []
         for idx, input_data in enumerate(inputs):
-            input_key = hash_input(input_data)
+            input_key = hash_input(self._cache_payload(input_data))
             if cache and task_name:
                 cached = cache.get(task_name, input_key)
                 if cached is not None:
