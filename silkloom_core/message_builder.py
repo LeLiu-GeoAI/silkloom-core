@@ -9,9 +9,9 @@ from jinja2 import StrictUndefined, Template
 
 
 class MessageBuilder:
-    def __init__(self, prompt_template: str, system_prompt: str | None = None):
-        self.template = Template(prompt_template, undefined=StrictUndefined)
-        self.system_prompt = system_prompt
+    def __init__(self, prompt: str, system: str | None = None):
+        self.template = Template(prompt, undefined=StrictUndefined)
+        self.system_prompt = system
 
     def build_messages(self, input_data: dict[str, Any]) -> list[dict[str, Any]]:
         text_vars = {k: v for k, v in input_data.items() if k != "images"}

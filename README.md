@@ -1,283 +1,213 @@
-# 📚 SilkLoom Core 3.0 API 设计与架构指南
+# SilkLoom Core
 
-## 1. 核心设计哲学 (Design Philosophy)
+SilkLoom Core is a small batch engine for OpenAI-compatible LLM and VLM calls.
+It focuses on the parts that become painful in production scripts:
 
-SilkLoom Core 3.0 定位于**极简、高可用、结构化的大模型多模态批处理引擎**。
+- Jinja prompt rendering
+- text and image message assembly
+- raw text, JSON, and Pydantic output parsing
+- retry capture with raw output and reasoning extraction
+- ordered batch execution
+- completion-order streaming
+- SQLite checkpoints for resumable runs
+- sync and async APIs with the same shape
 
-* **对外：低心智负担。** 坚持“一行代码跑通”，仅保留一套核心 API。
-* **对内：工程痛点吞噬者。** 采用“计算与存储分离”的流水线，默默处理并发调度、断点续跑、图片转换组装，以及依赖 `json_repair` 的脏 JSON 自动挽救。
+## Install
 
----
-
-## 2. 内部架构与数据流转 (Architecture & Pipeline)
-
-为了实现“可并行、可中断、可异步”，引擎底层执行器遵循以下状态流转：
-
-1. **哈希指纹化 (Fingerprinting)**：引擎遍历输入序列，为每个输入字典生成 SHA-256 哈希值作为唯一 `Task ID`。
-2. **缓存拦截 (Cache Intercept)**：如果指定了 `task_name`，引擎会查询本地 SQLite 库，命中的任务直接标记成功，瞬间通过。
-   
-    注意：为保证结果语义一致性，缓存键不仅基于输入内容，还包含会影响模型输出的运行时参数：`prompt_template`、`system_prompt`、`model`、`response_model` 的结构签名（Pydantic 模型字段指纹），以及经过清洗后的 `llm_kwargs`（会过滤回调/可调用对象并做稳定排序和序列化）。因此当提示词、响应模型或关键 LLM 参数发生变化时，旧缓存不会被错误命中。
-3. **并发调度 (Worker Pool)**：未命中缓存的任务进入同步线程池 (`ThreadPoolExecutor`) 或异步任务组 (`asyncio.gather`)。
-4. **原子持久化 (Atomic Persist)**：任务一旦成功（含 JSON 修复），立刻原子级 `Upsert` 写入 SQLite WAL 模式缓存。无论外部环境如何崩溃，已完成数据绝对安全。
-5. **灵活消费 (Flexible Consumption)**：通过 `map`（阻塞重排组装）或 `stream`（流式实时释放）将结果交付给前端。
-
----
-
-## 3. 核心 API 参考 (Core API Reference)
-
-### 3.1 主引擎：`TaskLoom`
-
-`TaskLoom` 是系统的唯一入口。支持作为上下文管理器（Context Manager）使用以自动释放底层连接资源。
-
-```python
-from typing import Any, AsyncGenerator, Generator, Generic, Iterable, TypeVar
-from pydantic import BaseModel
-from silkloom_core import TaskResult, BatchResult
-
-T = TypeVar("T")
-
-class TaskLoom(Generic[T]):
-    def __init__(
-        self,
-        model: str,
-        prompt_template: str,
-        system_prompt: str | None = None,
-        response_model: type[BaseModel] | type[dict] | None = None,
-        auto_repair_json: bool = True,
-        max_retries: int = 3,
-        client: Any | None = None,
-        db_path: str = ".silkloom.db",
-        **llm_kwargs: Any
-    ): ...
-
-    def close(self): ...
-    
-    # 支持 Context Manager
-    def __enter__(self) -> "TaskLoom": ...
-    def __exit__(self, exc_type, exc_val, exc_tb): ...
-
+```bash
+pip install silkloom-core
 ```
 
-**核心参数说明：**
+Optional extras:
 
-* `response_model`: 决定输出形态。传入 `Pydantic 模型` 返回强类型对象；传入 `dict` 返回字典；传入 `None` 返回原始文本。
-* `prompt_template`: Jinja2 语法的提示词模板（如 `"分析：{{ text }}"`）。
-
----
-
-### 3.2 数据模型 (Data Models)
-
-**单条快照：`TaskResult[T]**`
-
-```python
-class TaskResult(BaseModel, Generic[T]):
-    task_id: str              # 根据输入内容生成的唯一 Hash 指纹
-    is_success: bool          # 任务是否成功解析
-    data: T | None            # 最终结构化数据 (Pydantic实例 / Dict / Str)
-    error: str | None         # 异常堆栈 (仅失败时存在)
-    input_data: dict          # 触发该任务的原始输入字典
-    raw_output: str | None    # 大模型返回的原始字符串 (供脏数据兜底排查)
-    reasoning: str | None     # 模型推理过程 (如 DeepSeek <think>)
-    cached: bool              # 标识该结果是否来自于 SQLite 缓存
-
+```bash
+pip install "silkloom-core[data]"      # pandas export
+pip install "silkloom-core[progress]"  # tqdm, if you build your own progress UI
 ```
 
-**批次集合：`BatchResult[T]**` (仅 `map/amap` 返回)
+## The API
 
 ```python
-class BatchResult(Generic[T]):
-    results: list[TaskResult[T]]
-    
-    def successful(self) -> list[TaskResult[T]]: ...
-    def failed(self) -> list[TaskResult[T]]: ...
-    def to_pandas(self) -> "pd.DataFrame": ...  # 自动展平 data 导出
+from silkloom_core import Loom
 
+loom = Loom(
+    model="gpt-4o-mini",
+    prompt="Summarize this text in one sentence: {{ text }}",
+    temperature=0.2,
+)
+
+result = loom.run({"text": "SilkLoom is a batch engine for model workloads."})
+print(result.value)
 ```
 
----
+`Loom` is the only high-level object. It has six execution methods:
 
-### 3.3 执行模式 (Execution Matrix)
+- `run(data)` runs one item.
+- `arun(data)` runs one item asynchronously.
+- `batch(items, name=None, concurrency=5)` returns a `Batch` in input order.
+- `abatch(items, name=None, concurrency=5)` is the async batch API.
+- `each(items, name=None, concurrency=5, ordered=False)` yields `Result` objects.
+- `aeach(items, name=None, concurrency=5, ordered=False)` is the async streaming API.
 
-所有输入数据源（`data` / `sequence`）统一接受 **`dict` 或 `dict` 的集合**。包含 `images` 键时自动触发多模态逻辑。
+Input can be a string or a dictionary. Strings are normalized to `{"text": value}`.
 
-#### 1. 单例执行 (Single)
+## Structured Output
 
-适用于即时问答或单条测试。
+Use `output=dict` for JSON objects:
 
 ```python
-def process(self, data: str | dict) -> TaskResult[T]: ...
-async def aprocess(self, data: str | dict) -> TaskResult[T]: ...
+from silkloom_core import Loom
 
+loom = Loom(
+    model="gpt-4o-mini",
+    prompt="Return JSON with keys sentiment and keywords for: {{ text }}",
+    output=dict,
+)
+
+result = loom.run("The method is useful, but the experiments are weak.")
+print(result.unwrap()["keywords"])
 ```
 
-#### 2. 阻塞批处理 (Blocking Batch)
-
-适用于后台脚本或定时任务。等待所有任务跑完后一次性返回汇总结果。**默认保证返回顺序与输入顺序完全一致。**
-
-```python
-def map(
-    self,
-    sequence: Iterable[str | dict],
-    task_name: str | None = None,
-    max_workers: int = 5,
-) -> BatchResult[T]: ...
-
-async def amap(
-    self,
-    sequence: Iterable[str | dict],
-    task_name: str | None = None,
-    max_workers: int = 5,
-) -> BatchResult[T]: ...
-
-```
-
-#### 3. 流式批处理 (Streaming Batch) - ✨ 核心高阶 API
-
-适用于前端 UI（Gradio / Streamlit）或响应式 API。**极低内存占用，按完成状态实时 Yield**。
-
-```python
-def stream(
-    self,
-    sequence: Iterable[str | dict],
-    task_name: str | None = None,
-    max_workers: int = 5,
-    ordered: bool = False,
-) -> Generator[TaskResult[T], None, None]: ...
-
-async def astream(
-    self,
-    sequence: Iterable[str | dict],
-    task_name: str | None = None,
-    max_workers: int = 5,
-    ordered: bool = False,
-) -> AsyncGenerator[TaskResult[T], None]: ...
-
-```
-
-> **关于 `ordered` 参数：**
-> * `ordered=False` (默认)：先处理完的任务先返回。速度最快，UI 响应体验最佳。
-> * `ordered=True`：内部建立缓冲队列，严格按 `sequence` 的原顺序阻塞 Yield。
-> 
-> 
-
----
-
-## 4. 典型应用范例 (Best Practices)
-
-### 场景一：纯文本结构化抽取 (Pydantic 兜底)
-
-文本数据通过 Jinja2 渲染，底层自动执行校验与重试。
+Use a Pydantic model for validated typed output:
 
 ```python
 from pydantic import BaseModel
-from silkloom_core import TaskLoom
+from silkloom_core import Loom
 
-class UserProfile(BaseModel):
-    name: str
-    skills: list[str]
+class Review(BaseModel):
+    sentiment: str
+    keywords: list[str]
 
-with TaskLoom(
+loom = Loom(
     model="gpt-4o-mini",
-    prompt_template="提取简历中的信息：{{ text }}",
-    response_model=UserProfile,
-) as loom:
-
-    # 自动开启缓存与断点续跑机制
-    results = loom.map(
-        [{"text": "张三精通 Python"}, {"text": "李四会设计"}], 
-        task_name="cv_parse_v1",
-        max_workers=5
-    )
-
-    print(results.successful()[0].data.skills) # ["Python"]
-
-```
-
-### 场景二：多模态图像批处理
-
-引擎自动拦截 `images` 字段，完成本地图片转码/远程图片拉取，组装为大模型支持的复杂协议。
-
-```python
-loom = TaskLoom(
-    model="qwen-vl-max", 
-    prompt_template="根据要求分析图片：{{ instruction }}",
-    response_model=dict,
+    prompt="Return JSON matching the schema for: {{ text }}",
+    output=Review,
 )
 
-result = loom.process({
-    "instruction": "提取图中的菜名和总价",
-    "images": [
-        "./receipt_01.jpg",               # 自动读取并转 Base64
-        "https://example.com/menu.png"    # URL 直接透传
-    ]
-})
-
+review = loom.run({"text": "Clear writing, limited evaluation."}).unwrap()
+print(review.sentiment)
 ```
 
-### 场景三：Gradio 流式渲染与断点续跑 (UI 融合)
+SilkLoom extracts fenced JSON, can repair malformed JSON with `json-repair`, and separates DeepSeek-style `<think>...</think>` reasoning into `Result.reasoning`.
 
-利用 `stream`，哪怕网页中途关闭，已跑完的数据早已安全落库。再次点击瞬间完成缓存加载，进度条无缝续接。
+## Checkpointed Batch Runs
 
-```python
-import gradio as gr
-from silkloom_core import TaskLoom
-
-loom = TaskLoom(
-    model="deepseek-chat",
-    prompt_template="总结论文核心方法：{{ text }}",
-    response_model=dict
-)
-
-def process_papers(papers_list, progress=gr.Progress()):
-    total = len(papers_list)
-    results_list = []
-    
-    # stream(ordered=False) 保证最快的视觉反馈
-    generator = loom.stream(
-        sequence=papers_list,
-        task_name="gradio_paper_batch_v1",  # 开启容灾缓存
-        max_workers=10
-    )
-    
-    for i, task in enumerate(generator, 1):
-        status = "✅ 成功" if task.is_success else "❌ 失败"
-        progress(i / total, desc=f"进度: {i}/{total} | 最新: {status}")
-        
-        results_list.append({
-            "处理状态": status,
-            "提取数据": task.data,
-            "缓存命中": task.cached
-        })
-        
-        # 实时逐行更新 UI 表格
-        yield results_list
-
-```
-
-### 场景四：FastAPI 异步 SSE 实时推送
-
-在现代后端架构中，使用 `astream` 释放 ASGI 容器的最高并发性能。
+Pass `name` to enable SQLite checkpointing. The cache key includes the input, model, prompt, system message, output schema, and model parameters.
 
 ```python
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
-import json
+from silkloom_core import Loom
 
-app = FastAPI()
-loom = TaskLoom(
+loom = Loom(
     model="gpt-4o-mini",
-    prompt_template="提取发票关键信息：{{ text }}",
-    response_model=dict
+    prompt="Rewrite formally: {{ text }}",
+    cache=".silkloom.db",
 )
 
-@app.post("/api/batch_extract")
-async def batch_extract(payload: list[dict]):
-    
-    async def event_stream():
-        # 充分利用 asyncio 的并发调度机制
-        async for task in loom.astream(payload, task_name="invoice_prod", max_workers=20):
-            yield f"data: {json.dumps(task.model_dump())}\n\n"
-            
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+items = [
+    "This works pretty well.",
+    "The experiment needs more detail.",
+]
 
+batch = loom.batch(items, name="formal_rewrite_v1", concurrency=8)
+print(batch.values())
+
+# A later run with the same namespace and configuration reuses successful results.
+again = loom.batch(items, name="formal_rewrite_v1", concurrency=8)
+print([item.cache_hit for item in again])
+```
+
+## Streaming
+
+Use completion-order streaming for responsive UIs:
+
+```python
+for result in loom.each(items, name="formal_rewrite_v1", concurrency=8):
+    print(result.ok, result.value)
+```
+
+Use `ordered=True` when consumers require input order:
+
+```python
+for result in loom.each(items, concurrency=8, ordered=True):
+    print(result.value)
+```
+
+Async streaming has the same shape:
+
+```python
+async for result in loom.aeach(items, name="formal_rewrite_v1", concurrency=20):
+    print(result.value)
+```
+
+## Images
+
+If an input dictionary contains `images`, SilkLoom builds a multimodal OpenAI-compatible message. HTTP(S) and `data:image/...` URLs are passed through. Local files are converted to base64 data URLs.
+
+```python
+loom = Loom(
+    model="gpt-4o-mini",
+    prompt="Extract the menu item names and prices. Instruction: {{ instruction }}",
+    output=dict,
+)
+
+result = loom.run(
+    {
+        "instruction": "Return JSON only.",
+        "images": ["./receipt.jpg", "https://example.com/menu.png"],
+    }
+)
+```
+
+## Result Objects
+
+Each run returns a `Result`:
+
+```python
+result.ok          # bool
+result.value       # parsed value, or None on failure
+result.error       # traceback string on failure
+result.input       # normalized input dict
+result.output      # raw model text
+result.reasoning   # extracted <think> content, if present
+result.cache_hit   # true when loaded from SQLite
+result.attempts    # number of attempts used
+```
+
+`result.unwrap()` returns `value` or raises if the run failed.
+
+`Batch` is an iterable container with helpers:
+
+```python
+batch.successful()
+batch.failed()
+batch.values()
+batch.to_dicts()
+batch.to_pandas()
+```
+
+## Custom Clients
+
+By default, `Loom` creates OpenAI SDK clients. You can also pass an existing OpenAI-compatible client:
+
+```python
+from openai import OpenAI
+from silkloom_core import Loom
+
+client = OpenAI(base_url="https://api.example.com/v1", api_key="...")
+
+loom = Loom(
+    model="provider-model",
+    prompt="{{ text }}",
+    client=client,
+)
+```
+
+For full control, pass an object that implements:
+
+```python
+class MyClient:
+    def complete(self, *, model, messages, params) -> str: ...
+    async def acomplete(self, *, model, messages, params) -> str: ...
+    def close(self) -> None: ...
+    async def aclose(self) -> None: ...
 ```

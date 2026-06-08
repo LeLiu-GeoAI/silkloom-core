@@ -7,52 +7,55 @@ from pathlib import Path
 from typing import Any
 
 
-def hash_input(data: dict[str, Any]) -> str:
-    payload = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
+def stable_hash(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-class SQLiteCache:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self._ensure_table()
+class SQLiteCheckpoint:
+    def __init__(self, path: str | Path = ".silkloom.db"):
+        self.path = Path(path)
+        self._ensure_schema()
 
-    def _connect(self) -> sqlite3.Connection:
-        path = Path(self.db_path)
-        if path.parent and not path.parent.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        return conn
+    def get(self, namespace: str, key: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM silkloom_results WHERE namespace = ? AND cache_key = ?",
+                (namespace, key),
+            ).fetchone()
+        return row[0] if row else None
 
-    def _ensure_table(self) -> None:
+    def set(self, namespace: str, key: str, payload: str) -> None:
         with self._connect() as conn:
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS silkloom_cache (
-                    run_id TEXT NOT NULL,
-                    input_hash TEXT NOT NULL,
-                    result_json TEXT NOT NULL,
+                INSERT OR REPLACE INTO silkloom_results (namespace, cache_key, payload)
+                VALUES (?, ?, ?)
+                """,
+                (namespace, key, payload),
+            )
+
+    def _connect(self) -> sqlite3.Connection:
+        if self.path.parent and not self.path.parent.exists():
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.path)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        return conn
+
+    def _ensure_schema(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS silkloom_results (
+                    namespace TEXT NOT NULL,
+                    cache_key TEXT NOT NULL,
+                    payload TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (run_id, input_hash)
+                    PRIMARY KEY (namespace, cache_key)
                 )
                 """
             )
 
-    def get(self, run_id: str, input_hash: str) -> str | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT result_json FROM silkloom_cache WHERE run_id = ? AND input_hash = ?",
-                (run_id, input_hash),
-            ).fetchone()
-            return row[0] if row else None
 
-    def set(self, run_id: str, input_hash: str, result_json: str) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO silkloom_cache (run_id, input_hash, result_json)
-                VALUES (?, ?, ?)
-                """,
-                (run_id, input_hash, result_json),
-            )
+SQLiteCache = SQLiteCheckpoint
+hash_input = stable_hash
