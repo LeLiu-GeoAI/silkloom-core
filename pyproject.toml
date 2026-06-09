@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "silkloom-core"
 version = "4.0.0"
-description = "SilkLoom Core: minimal stateful batch engine for LLM and VLM workloads"
+description = "SilkLoom Core: DataFrame-first batch runner for LLM and VLM workloads"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "openai>=1.40.0",
-  "pydantic>=2.0",
   "jinja2>=3.1.0",
-  "json-repair>=0.39.1"
+  "json-repair>=0.39.1",
+  "pandas>=2.0"
 ]
 authors = [
   { name = "SilkLoom Core Contributors" }
@@ -30,14 +30,10 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-data = [
-  "pandas>=2.0",
-]
 progress = [
   "tqdm>=4.66.0",
 ]
 full = [
-  "pandas>=2.0",
   "tqdm>=4.66.0",
 ]
 dev = [

@@ -1,16 +1,12 @@
 # SilkLoom Core
 
-SilkLoom Core is a small batch engine for OpenAI-compatible LLM and VLM calls.
-It focuses on the parts that become painful in production scripts:
+SilkLoom Core is a DataFrame-first batch runner for OpenAI-compatible LLM and VLM workloads.
 
-- Jinja prompt rendering
-- text and image message assembly
-- raw text, JSON, and Pydantic output parsing
-- retry capture with raw output and reasoning extraction
-- ordered batch execution
-- completion-order streaming
-- SQLite checkpoints for resumable runs
-- sync and async APIs with the same shape
+Its core shape is:
+
+```text
+indexed data -> selected input columns -> model calls -> repaired JSON -> wider DataFrame
+```
 
 ## Install
 
@@ -18,171 +14,181 @@ It focuses on the parts that become painful in production scripts:
 pip install silkloom-core
 ```
 
-Optional extras:
-
-```bash
-pip install "silkloom-core[data]"      # pandas export
-pip install "silkloom-core[progress]"  # tqdm, if you build your own progress UI
-```
-
-## The API
+## Quick Start
 
 ```python
+import pandas as pd
 from silkloom_core import Loom
+
+df = pd.read_csv("papers.csv")
 
 loom = Loom(
     model="gpt-4o-mini",
-    prompt="Summarize this text in one sentence: {{ text }}",
-    temperature=0.2,
+    prompt="""
+Analyze this paper and return JSON only.
+
+Title: {{ title }}
+Abstract: {{ abstract }}
+
+Return keys: sentiment, summary, keywords.
+""",
 )
 
-result = loom.run({"text": "SilkLoom is a batch engine for model workloads."})
-print(result.value)
+df = loom(
+    df,
+    input=["title", "abstract"],
+    resume="paper_analysis_v1",
+    concurrency=10,
+)
+
+df.to_csv("papers_with_analysis.csv", index=False)
 ```
 
-`Loom` is the only high-level object. It has six execution methods:
+The returned DataFrame keeps the original index and columns, then appends model output columns.
 
-- `run(data)` runs one item.
-- `arun(data)` runs one item asynchronously.
-- `batch(items, name=None, concurrency=5)` returns a `Batch` in input order.
-- `abatch(items, name=None, concurrency=5)` is the async batch API.
-- `each(items, name=None, concurrency=5, ordered=False)` yields `Result` objects.
-- `aeach(items, name=None, concurrency=5, ordered=False)` is the async streaming API.
+## Inputs
 
-Input can be a string or a dictionary. Strings are normalized to `{"text": value}`.
-
-## Structured Output
-
-Use `output=dict` for JSON objects:
+Use a pandas DataFrame:
 
 ```python
-from silkloom_core import Loom
+out = loom(df, input=["title", "abstract"])
+```
 
+Or a sequence of row mappings:
+
+```python
+out = loom(
+    [
+        {"text": "The experiment is promising."},
+        {"text": "The evaluation is incomplete."},
+    ],
+    input="text",
+)
+```
+
+The output is always a pandas DataFrame.
+
+## Output
+
+By default, SilkLoom expects JSON object output and expands its keys into columns.
+
+```python
 loom = Loom(
     model="gpt-4o-mini",
-    prompt="Return JSON with keys sentiment and keywords for: {{ text }}",
-    output=dict,
+    prompt="Classify this text and return JSON with keys label and score: {{ text }}",
 )
 
-result = loom.run("The method is useful, but the experiments are weak.")
-print(result.unwrap()["keywords"])
+out = loom(df, input="text")
 ```
 
-Use a Pydantic model for validated typed output:
+If the model returns:
+
+```json
+{"label": "positive", "score": 0.92}
+```
+
+SilkLoom appends:
+
+```text
+label | score
+```
+
+Malformed JSON is repaired with `json_repair.repair_json(..., return_objects=True)`.
+
+## Status Columns
+
+SilkLoom appends status columns by default:
+
+```text
+_loom_ok
+_loom_error
+_loom_checkpoint
+_loom_attempts
+```
+
+You can also include raw model output and extracted reasoning:
 
 ```python
-from pydantic import BaseModel
-from silkloom_core import Loom
-
-class Review(BaseModel):
-    sentiment: str
-    keywords: list[str]
-
-loom = Loom(
-    model="gpt-4o-mini",
-    prompt="Return JSON matching the schema for: {{ text }}",
-    output=Review,
+out = loom(
+    df,
+    input="text",
+    include_output=True,
+    include_reasoning=True,
 )
-
-review = loom.run({"text": "Clear writing, limited evaluation."}).unwrap()
-print(review.sentiment)
 ```
 
-SilkLoom extracts fenced JSON, can repair malformed JSON with `json-repair`, and separates DeepSeek-style `<think>...</think>` reasoning into `Result.reasoning`.
+This adds:
 
-## Checkpointed Batch Runs
+```text
+_loom_output
+_loom_reasoning
+```
 
-Pass `name` to enable SQLite checkpointing. The cache key includes the input, model, prompt, system message, output schema, and model parameters.
+Disable status columns with:
 
 ```python
-from silkloom_core import Loom
+out = loom(df, input="text", status=False)
+```
 
-loom = Loom(
-    model="gpt-4o-mini",
-    prompt="Rewrite formally: {{ text }}",
-    cache=".silkloom.db",
+## Resumable Runs
+
+Pass `resume` to enable SQLite checkpointing. SQLite is the default checkpoint backend.
+
+```python
+out = loom(
+    df,
+    input=["title", "abstract"],
+    resume="paper_analysis_v1",
+    concurrency=10,
 )
-
-items = [
-    "This works pretty well.",
-    "The experiment needs more detail.",
-]
-
-batch = loom.batch(items, name="formal_rewrite_v1", concurrency=8)
-print(batch.values())
-
-# A later run with the same namespace and configuration reuses successful results.
-again = loom.batch(items, name="formal_rewrite_v1", concurrency=8)
-print([item.cache_hit for item in again])
 ```
 
-## Streaming
+The checkpoint fingerprint includes the selected row input, model, prompt, system message, output schema, and model parameters.
 
-Use completion-order streaming for responsive UIs:
+Each SQLite row stores a self-describing JSON payload with:
+
+- SilkLoom version
+- resume namespace
+- model, prompt, system message, model parameters, retry settings, and JSON repair setting
+- selected input columns and image columns
+- normalized row input, including resolved `images`
+- rendered OpenAI-compatible message payload
+- parsed JSON result
+- raw model output, extracted reasoning, error trace, attempt count, and checkpoint status
+
+To disable checkpointing:
 
 ```python
-for result in loom.each(items, name="formal_rewrite_v1", concurrency=8):
-    print(result.ok, result.value)
+loom = Loom(..., checkpoint=None)
 ```
 
-Use `ordered=True` when consumers require input order:
+## Column Conflicts
+
+If model output columns conflict with existing DataFrame columns, SilkLoom raises. Use `prefix` when you want to keep both.
 
 ```python
-for result in loom.each(items, concurrency=8, ordered=True):
-    print(result.value)
-```
-
-Async streaming has the same shape:
-
-```python
-async for result in loom.aeach(items, name="formal_rewrite_v1", concurrency=20):
-    print(result.value)
+out = loom(df, input="text", prefix="llm_")
 ```
 
 ## Images
 
-If an input dictionary contains `images`, SilkLoom builds a multimodal OpenAI-compatible message. HTTP(S) and `data:image/...` URLs are passed through. Local files are converted to base64 data URLs.
+If an input row contains an `images` column, SilkLoom builds a multimodal OpenAI-compatible message. HTTP(S) and `data:image/...` URLs are passed through. Local files are converted to base64 data URLs.
 
 ```python
-loom = Loom(
-    model="gpt-4o-mini",
-    prompt="Extract the menu item names and prices. Instruction: {{ instruction }}",
-    output=dict,
-)
-
-result = loom.run(
+df = pd.DataFrame(
     {
-        "instruction": "Return JSON only.",
-        "images": ["./receipt.jpg", "https://example.com/menu.png"],
+        "instruction": ["Extract menu item names and prices."],
+        "images": [["./receipt.jpg"]],
     }
 )
+
+out = loom(df, input="instruction", images="images")
 ```
 
-## Result Objects
-
-Each run returns a `Result`:
+You can also pass multiple image columns:
 
 ```python
-result.ok          # bool
-result.value       # parsed value, or None on failure
-result.error       # traceback string on failure
-result.input       # normalized input dict
-result.output      # raw model text
-result.reasoning   # extracted <think> content, if present
-result.cache_hit   # true when loaded from SQLite
-result.attempts    # number of attempts used
-```
-
-`result.unwrap()` returns `value` or raises if the run failed.
-
-`Batch` is an iterable container with helpers:
-
-```python
-batch.successful()
-batch.failed()
-batch.values()
-batch.to_dicts()
-batch.to_pandas()
+out = loom(df, input="instruction", images=["front_image", "back_image"])
 ```
 
 ## Custom Clients

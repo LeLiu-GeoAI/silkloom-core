@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pandas as pd
 from openai import OpenAI
-from pydantic import BaseModel
 
 from silkloom_core import Loom
 
@@ -22,11 +22,6 @@ def load_env(path: str = ".env") -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-class TextAnalysis(BaseModel):
-    sentiment: str
-    keywords: list[str]
-
-
 def main() -> None:
     load_env()
 
@@ -35,38 +30,32 @@ def main() -> None:
         base_url=os.getenv("BASE_URL"),
     )
 
-    raw = Loom(
-        model=os.getenv("MODEL", "gpt-4o-mini"),
-        prompt="Rewrite this sentence in a more formal academic tone: {{ text }}",
-        client=client,
-        temperature=0.2,
+    df = pd.DataFrame(
+        {
+            "text": [
+                "The paper is clear, but the evaluation is too small.",
+                "The implementation is reliable and easy to reproduce.",
+            ]
+        }
     )
-    print(raw.run("We found that this method works pretty well.").unwrap())
 
-    structured = Loom(
+    loom = Loom(
         model=os.getenv("MODEL", "gpt-4o-mini"),
         prompt=(
-            "Analyze the text and return JSON with keys sentiment and keywords. "
-            "Text: {{ text }}"
+            "Analyze the text and return JSON only with keys "
+            "sentiment, summary, and keywords. Text: {{ text }}"
         ),
-        output=TextAnalysis,
         client=client,
         temperature=0.1,
     )
-    analysis = structured.run("The paper is clear, but the evaluation is too small.").unwrap()
-    print(analysis)
 
-    items = [
-        "The implementation is reliable.",
-        "The experiment section needs more details.",
-        "The result is promising but not conclusive.",
-    ]
-
-    batch = raw.batch(items, name="simple_rewrite_v1", concurrency=3)
-    print(batch.values())
-
-    for result in raw.each(items, name="simple_rewrite_v1", concurrency=3):
-        print("cached" if result.cache_hit else "fresh", result.unwrap())
+    out = loom(
+        df,
+        input="text",
+        resume="simple_text_analysis_v1",
+        concurrency=3,
+    )
+    print(out)
 
 
 if __name__ == "__main__":

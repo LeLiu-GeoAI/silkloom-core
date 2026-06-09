@@ -1,14 +1,14 @@
-from .cache import SQLiteCheckpoint
+__version__ = "4.0.0"
+
+from .checkpoint import ResultStore, RunFingerprint, SQLiteCheckpoint
 from .clients import ChatClient, OpenAIChat
-from .models import Batch, Result, RunConfig
 from .taskloom import Loom
 
 __all__ = [
-    "Batch",
     "ChatClient",
     "Loom",
     "OpenAIChat",
-    "Result",
-    "RunConfig",
+    "ResultStore",
+    "RunFingerprint",
     "SQLiteCheckpoint",
 ]
