@@ -1,4 +1,4 @@
-__version__ = "4.0.0"
+__version__ = "5.0.2"
 
 from .checkpoint import ResultStore, RunFingerprint, SQLiteCheckpoint
 from .clients import ChatClient, OpenAIChat

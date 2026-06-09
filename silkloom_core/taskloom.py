@@ -4,7 +4,7 @@ import json
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from . import __version__
 from .checkpoint import ResultStore, RunFingerprint, SQLiteCheckpoint, stable_hash
@@ -52,6 +52,8 @@ class Loom:
         status: bool = True,
         include_output: bool = False,
         include_reasoning: bool = False,
+        progress: bool | str = False,
+        on_progress: Callable[[int, int, dict[str, Any]], Any] | None = None,
     ):
         pd = self._pandas()
         frame = self._frame(data)
@@ -66,7 +68,13 @@ class Loom:
             image_columns=image_columns,
             concurrency=concurrency,
         )
-        states = self._run_rows(records, context=context, concurrency=concurrency)
+        states = self._run_rows(
+            records,
+            context=context,
+            concurrency=concurrency,
+            progress=progress,
+            on_progress=on_progress,
+        )
 
         generated = pd.DataFrame([state["result"]["value"] if state["result"]["ok"] else {} for state in states], index=frame.index)
         generated = self._prepare_output_columns(frame, generated, prefix)
@@ -111,31 +119,44 @@ class Loom:
         *,
         context: dict[str, Any],
         concurrency: int,
+        progress: bool | str,
+        on_progress: Callable[[int, int, dict[str, Any]], Any] | None,
     ) -> list[dict[str, Any]]:
         loaded: dict[int, dict[str, Any]] = {}
         pending: list[tuple[int, dict[str, Any], str]] = []
         fingerprint = self._fingerprint()
         resume = context["namespace"]
+        completed = 0
+        total = len(records)
+        bar = self._progress_bar(progress, total)
 
-        for index, record in enumerate(records):
-            key = fingerprint.for_input(record)
-            payload = self.checkpoint.get(resume, key) if self.checkpoint and resume else None
-            if payload is None:
-                pending.append((index, record, key))
-                continue
-            state = json.loads(payload)
-            state["result"]["checkpoint"] = True
-            loaded[index] = state
+        try:
+            for index, record in enumerate(records):
+                key = fingerprint.for_input(record)
+                payload = self.checkpoint.get(resume, key) if self.checkpoint and resume else None
+                if payload is None:
+                    pending.append((index, record, key))
+                    continue
+                state = json.loads(payload)
+                state["result"]["checkpoint"] = True
+                loaded[index] = state
+                completed += 1
+                self._emit_progress(completed, total, state, on_progress, bar)
 
-        states: list[dict[str, Any] | None] = [loaded.get(index) for index in range(len(records))]
-        with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
-            futures = {pool.submit(self._run_row, record, key, context): (index, key) for index, record, key in pending}
-            for future in as_completed(futures):
-                index, key = futures[future]
-                state = future.result()
-                if self.checkpoint and resume and state["result"]["ok"]:
-                    self.checkpoint.put(resume, key, json.dumps(state, ensure_ascii=False, default=str))
-                states[index] = state
+            states: list[dict[str, Any] | None] = [loaded.get(index) for index in range(len(records))]
+            with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+                futures = {pool.submit(self._run_row, record, key, context): (index, key) for index, record, key in pending}
+                for future in as_completed(futures):
+                    index, key = futures[future]
+                    state = future.result()
+                    if self.checkpoint and resume and state["result"]["ok"]:
+                        self.checkpoint.put(resume, key, json.dumps(state, ensure_ascii=False, default=str))
+                    states[index] = state
+                    completed += 1
+                    self._emit_progress(completed, total, state, on_progress, bar)
+        finally:
+            if bar is not None:
+                bar.close()
 
         return [state for state in states if state is not None]
 
@@ -224,6 +245,30 @@ class Loom:
                 row["_loom_reasoning"] = result["reasoning"]
             rows.append(row)
         return self._pandas().DataFrame(rows, index=index)
+
+    def _progress_bar(self, progress: bool | str, total: int):
+        if not progress:
+            return None
+        try:
+            from tqdm.auto import tqdm
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError("Install silkloom-core[progress] to use progress=True.") from exc
+
+        desc = "SilkLoom" if progress is True else str(progress)
+        return tqdm(total=total, desc=desc)
+
+    def _emit_progress(
+        self,
+        completed: int,
+        total: int,
+        state: dict[str, Any],
+        on_progress: Callable[[int, int, dict[str, Any]], Any] | None,
+        bar: Any,
+    ) -> None:
+        if bar is not None:
+            bar.update(1)
+        if on_progress is not None:
+            on_progress(completed, total, state)
 
     def _run_context(
         self,

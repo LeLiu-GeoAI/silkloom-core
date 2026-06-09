@@ -126,6 +126,45 @@ def test_checkpoint_reuses_successful_rows(tmp_path):
     assert list(second["_loom_checkpoint"]) == [True, True]
 
 
+def test_progress_callback_reports_completed_rows():
+    df = pd.DataFrame({"text": ["a", "b"]})
+    calls = []
+    loom = Loom(
+        model="x",
+        prompt="{{ text }}",
+        client=FakeClient(['{"value":"one"}', '{"value":"two"}']),
+        checkpoint=None,
+    )
+
+    loom(df, input="text", concurrency=2, on_progress=lambda done, total, state: calls.append((done, total, state)))
+
+    assert [call[0] for call in calls] == [1, 2]
+    assert [call[1] for call in calls] == [2, 2]
+    assert all(call[2]["result"]["ok"] for call in calls)
+
+
+def test_progress_callback_reports_checkpoint_hits(tmp_path):
+    df = pd.DataFrame({"text": ["a"]})
+    db = tmp_path / "checkpoint.db"
+    Loom(
+        model="x",
+        prompt="{{ text }}",
+        client=FakeClient(['{"value":"one"}']),
+        checkpoint=db,
+    )(df, input="text", resume="progress")
+    calls = []
+
+    Loom(
+        model="x",
+        prompt="{{ text }}",
+        client=FakeClient(['{"value":"unused"}']),
+        checkpoint=db,
+    )(df, input="text", resume="progress", on_progress=lambda done, total, state: calls.append((done, total, state)))
+
+    assert calls[0][0:2] == (1, 1)
+    assert calls[0][2]["result"]["checkpoint"] is True
+
+
 def test_checkpoint_payload_is_self_describing(tmp_path):
     df = pd.DataFrame({"text": ["a"]})
     db = tmp_path / "checkpoint.db"

@@ -130,6 +130,47 @@ Disable status columns with:
 out = loom(df, input="text", status=False)
 ```
 
+## Progress
+
+Show a tqdm progress bar:
+
+```python
+out = loom(
+    df,
+    input="text",
+    progress=True,
+)
+```
+
+Use a custom progress label:
+
+```python
+out = loom(
+    df,
+    input="text",
+    progress="Analyzing papers",
+)
+```
+
+For UI frameworks such as Gradio, use `on_progress`. The callback receives `completed`, `total`, and the full checkpoint-style row state.
+
+```python
+import gradio as gr
+
+def analyze(file, progress=gr.Progress()):
+    df = pd.read_csv(file.name)
+
+    def update(done, total, state):
+        progress(done / total, desc=f"{done}/{total}")
+
+    return loom(
+        df,
+        input="text",
+        resume="gradio_text_analysis_v1",
+        on_progress=update,
+    )
+```
+
 ## Resumable Runs
 
 Pass `resume` to enable SQLite checkpointing. SQLite is the default checkpoint backend.
