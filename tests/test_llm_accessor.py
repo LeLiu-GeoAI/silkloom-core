@@ -35,6 +35,21 @@ class FakeClient:
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.chat_impl.create))
 
 
+class FailingChat:
+    def __init__(self):
+        self.calls = 0
+
+    def create(self, **kwargs):
+        self.calls += 1
+        raise RuntimeError("network down")
+
+
+class FailingClient:
+    def __init__(self):
+        self.chat_impl = FailingChat()
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.chat_impl.create))
+
+
 def test_accessor_extracts_json_to_result_frame(tmp_path):
     client = FakeClient(['{"sentiment":"positive","score":0.9}', '{"sentiment":"neutral","score":0.5}'])
     df = pd.DataFrame(
@@ -72,6 +87,63 @@ def test_cache_reuses_successful_response(tmp_path):
 
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT count(*) FROM cache").fetchone()[0] == 1
+
+
+def test_cache_records_request_and_parsed_result(tmp_path):
+    db = tmp_path / "cache.db"
+    client = FakeClient(['{"value":"saved"}'])
+    df = pd.DataFrame({"text": ["hello"]})
+
+    df.llm.setup(client=client, cache_path=db).extract(
+        "Analyze {{ text }}",
+        model="audit-model",
+        temperature=0.2,
+        verbose=False,
+    )
+
+    with sqlite3.connect(db) as conn:
+        row = conn.execute(
+            """
+            SELECT ok, model, messages_json, params_json, request_json, response, parsed_json, error, attempts
+            FROM cache
+            """
+        ).fetchone()
+
+    messages = json_loads(row[2])
+    params = json_loads(row[3])
+    request = json_loads(row[4])
+    parsed = json_loads(row[6])
+
+    assert row[0] == 1
+    assert row[1] == "audit-model"
+    assert messages[-1]["content"] == "Analyze hello"
+    assert params == {"temperature": 0.2}
+    assert request["model"] == "audit-model"
+    assert row[5] == '{"value":"saved"}'
+    assert parsed == {"value": "saved"}
+    assert row[7] is None
+    assert row[8] == 1
+
+
+def test_cache_records_failed_request_without_cache_hit(tmp_path):
+    db = tmp_path / "cache.db"
+    client = FailingClient()
+    df = pd.DataFrame({"text": ["hello"]})
+
+    out = df.llm.setup(client=client, cache_path=db).extract("{{ text }}", max_retries=0, verbose=False)
+    retry = df.llm.setup(client=client, cache_path=db).extract("{{ text }}", max_retries=0, verbose=False)
+
+    assert "network down" in out.loc[0, "_llm_error"]
+    assert "network down" in retry.loc[0, "_llm_error"]
+    assert client.chat_impl.calls == 2
+
+    with sqlite3.connect(db) as conn:
+        row = conn.execute("SELECT ok, response, error, attempts FROM cache").fetchone()
+
+    assert row[0] == 0
+    assert row[1] == ""
+    assert "network down" in row[2]
+    assert row[3] == 1
 
 
 def test_dirty_json_is_repaired(tmp_path):
@@ -145,4 +217,10 @@ def test_progress_callback_reports_completed_rows(tmp_path):
     )
 
     assert calls == [(1, 2), (2, 2)]
-    assert silkloom_core.__version__ == "6.0.1"
+    assert silkloom_core.__version__ == "6.0.2"
+
+
+def json_loads(value):
+    import json
+
+    return json.loads(value)

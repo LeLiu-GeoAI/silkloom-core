@@ -41,14 +41,65 @@ class SQLiteCache:
 
     def get(self, key: str) -> str | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT response FROM cache WHERE cache_key = ?", (key,)).fetchone()
+            row = conn.execute(
+                "SELECT response FROM cache WHERE cache_key = ? AND ok = 1",
+                (key,),
+            ).fetchone()
         return row[0] if row else None
 
-    def set(self, key: str, response: str) -> None:
+    def put(
+        self,
+        key: str,
+        *,
+        request: dict[str, Any],
+        response: str | None = None,
+        parsed: dict[str, Any] | None = None,
+        error: str | None = None,
+        ok: bool = False,
+        attempts: int = 0,
+    ) -> None:
+        params = {name: value for name, value in request.items() if name not in {"model", "messages"}}
         with self._connect() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO cache (cache_key, response) VALUES (?, ?)",
-                (key, response),
+                """
+                INSERT INTO cache (
+                    cache_key,
+                    ok,
+                    model,
+                    messages_json,
+                    params_json,
+                    request_json,
+                    response,
+                    parsed_json,
+                    error,
+                    attempts,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    ok = excluded.ok,
+                    model = excluded.model,
+                    messages_json = excluded.messages_json,
+                    params_json = excluded.params_json,
+                    request_json = excluded.request_json,
+                    response = excluded.response,
+                    parsed_json = excluded.parsed_json,
+                    error = excluded.error,
+                    attempts = excluded.attempts,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    key,
+                    int(ok),
+                    request.get("model"),
+                    self._json(request.get("messages")),
+                    self._json(params),
+                    self._json(request),
+                    response or "",
+                    self._json(parsed),
+                    error,
+                    attempts,
+                ),
             )
 
     def _connect(self) -> sqlite3.Connection:
@@ -66,10 +117,39 @@ class SQLiteCache:
                 CREATE TABLE IF NOT EXISTS cache (
                     cache_key TEXT PRIMARY KEY,
                     response TEXT NOT NULL,
+                    ok INTEGER NOT NULL DEFAULT 1,
+                    model TEXT,
+                    messages_json TEXT,
+                    params_json TEXT,
+                    request_json TEXT,
+                    parsed_json TEXT,
+                    error TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(cache)")}
+            columns = {
+                "ok": "INTEGER NOT NULL DEFAULT 1",
+                "model": "TEXT",
+                "messages_json": "TEXT",
+                "params_json": "TEXT",
+                "request_json": "TEXT",
+                "parsed_json": "TEXT",
+                "error": "TEXT",
+                "attempts": "INTEGER NOT NULL DEFAULT 0",
+                "updated_at": "TEXT",
+            }
+            for name, definition in columns.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE cache ADD COLUMN {name} {definition}")
+
+    def _json(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
 @pd.api.extensions.register_dataframe_accessor("llm")
@@ -205,15 +285,31 @@ class PandasLLMAccessor:
                 response = self._client.chat.completions.create(**request)
                 raw_content = self._response_text(response)
                 parsed = self._parse_content(raw_content)
-                if "_llm_error" not in parsed:
-                    self._cache.set(cache_key, raw_content)
+                self._cache.put(
+                    cache_key,
+                    request=request,
+                    response=raw_content,
+                    parsed=parsed,
+                    error=parsed.get("_llm_error"),
+                    ok="_llm_error" not in parsed,
+                    attempts=attempt + 1,
+                )
                 return parsed
             except Exception as exc:
                 last_error = str(exc)
                 if attempt < max_retries:
                     time.sleep(2**attempt)
 
-        return {"_llm_error": f"Failed after {max_retries} retries. Error: {last_error}"}
+        error_result = {"_llm_error": f"Failed after {max_retries} retries. Error: {last_error}"}
+        self._cache.put(
+            cache_key,
+            request=request,
+            parsed=error_result,
+            error=error_result["_llm_error"],
+            ok=False,
+            attempts=max_retries + 1,
+        )
+        return error_result
 
     def _messages(
         self,

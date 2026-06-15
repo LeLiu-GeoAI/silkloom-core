@@ -79,15 +79,30 @@ out = df.llm.extract(
 
 Malformed JSON is parsed with `json_repair`. If the model returns a JSON object, its keys become columns. If it returns another JSON value, the value is placed in `_llm_raw`. Parse or request failures are returned in `_llm_error`.
 
-## Cache
+## Cache And Audit Records
 
-Successful raw responses are cached in SQLite. The cache key includes the model, rendered messages, JSON mode, and request options.
+SQLite stores successful responses for cache reuse and also keeps richer request records for inspection. The cache key includes the model, rendered messages, JSON mode, and request options.
 
 ```python
 df.llm.setup(cache_path="cache/llm.sqlite").extract(...)
 ```
 
-Use a new cache path or delete the SQLite file when you want a fresh run.
+The `cache` table includes:
+
+- `cache_key`
+- `ok`
+- `model`
+- `messages_json`
+- `params_json`
+- `request_json`
+- `response`
+- `parsed_json`
+- `error`
+- `attempts`
+- `created_at`
+- `updated_at`
+
+Only rows with `ok = 1` are reused as cache hits. Failed requests and parse errors are recorded for debugging but are retried on the next run. Use a new cache path or delete the SQLite file when you want a fresh run.
 
 ## Images
 
