@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 import json_repair
 import pandas as pd
+from jinja2 import StrictUndefined, Template
 from openai import OpenAI
 
 
@@ -115,6 +116,8 @@ class PandasLLMAccessor:
         if image_column is not None and image_column not in self._obj.columns:
             raise KeyError(f"Image column not found: {image_column}")
 
+        template = Template(prompt_template, undefined=StrictUndefined)
+
         self._cancel_event.clear()
         total = len(self._obj)
         completed = 0
@@ -125,7 +128,7 @@ class PandasLLMAccessor:
                 pool.submit(
                     self._process_row,
                     row,
-                    prompt_template,
+                    template,
                     image_column,
                     system_prompt,
                     model,
@@ -167,7 +170,7 @@ class PandasLLMAccessor:
     def _process_row(
         self,
         row: pd.Series,
-        prompt_template: str,
+        prompt_template: Template,
         image_column: str | None,
         system_prompt: str | None,
         model: str,
@@ -179,7 +182,7 @@ class PandasLLMAccessor:
             return {"_llm_error": "Cancelled by user"}
 
         try:
-            user_prompt = prompt_template.format(**row.to_dict())
+            user_prompt = prompt_template.render(**row.to_dict())
             messages = self._messages(row, user_prompt, image_column, system_prompt)
         except Exception as exc:
             return {"_llm_error": str(exc)}

@@ -43,9 +43,9 @@ def test_accessor_extracts_json_to_result_frame(tmp_path):
     )
 
     out = df.llm.setup(client=client, cache_path=tmp_path / "cache.db").extract(
-        "{title}: {abstract}",
+        "{{ title }}: {{ abstract }}",
         model="test-model",
-        max_workers=2,
+        max_workers=1,
         verbose=False,
     )
 
@@ -60,10 +60,10 @@ def test_cache_reuses_successful_response(tmp_path):
     df = pd.DataFrame({"text": ["same"]})
 
     first = FakeClient(['{"value":"cached"}'])
-    out1 = df.llm.setup(client=first, cache_path=db).extract("{text}", verbose=False)
+    out1 = df.llm.setup(client=first, cache_path=db).extract("{{ text }}", verbose=False)
 
     second = FakeClient(['{"value":"unused"}'])
-    out2 = df.llm.setup(client=second, cache_path=db).extract("{text}", verbose=False)
+    out2 = df.llm.setup(client=second, cache_path=db).extract("{{ text }}", verbose=False)
 
     assert out1.loc[0, "value"] == "cached"
     assert out2.loc[0, "value"] == "cached"
@@ -78,7 +78,7 @@ def test_dirty_json_is_repaired(tmp_path):
     client = FakeClient(['{"name": "Ada", "skills": ["Python",]}'])
     df = pd.DataFrame({"text": ["profile"]})
 
-    out = df.llm.setup(client=client, cache_path=tmp_path / "cache.db").extract("{text}", verbose=False)
+    out = df.llm.setup(client=client, cache_path=tmp_path / "cache.db").extract("{{ text }}", verbose=False)
 
     assert out.loc[0, "name"] == "Ada"
     assert out.loc[0, "skills"] == ["Python"]
@@ -88,9 +88,23 @@ def test_non_object_json_returns_raw_column(tmp_path):
     client = FakeClient(["not json"])
     df = pd.DataFrame({"text": ["profile"]})
 
-    out = df.llm.setup(client=client, cache_path=tmp_path / "cache.db").extract("{text}", verbose=False)
+    out = df.llm.setup(client=client, cache_path=tmp_path / "cache.db").extract("{{ text }}", verbose=False)
 
     assert out.loc[0, "_llm_raw"] == "not json"
+
+
+def test_prompt_can_contain_literal_json_braces(tmp_path):
+    client = FakeClient(['{"label":"ok"}'])
+    df = pd.DataFrame({"text": ["hello"]})
+
+    df.llm.setup(client=client, cache_path=tmp_path / "cache.db").extract(
+        'Read {{ text }} and return JSON like {"label": "short"}',
+        verbose=False,
+    )
+
+    prompt = client.chat_impl.calls[0]["messages"][-1]["content"]
+    assert prompt == 'Read hello and return JSON like {"label": "short"}'
+
 
 
 def test_image_column_builds_multimodal_message(tmp_path):
@@ -106,7 +120,7 @@ def test_image_column_builds_multimodal_message(tmp_path):
     df = pd.DataFrame({"instruction": ["describe"], "image_path": [str(image)]})
 
     out = df.llm.setup(client=client, cache_path=tmp_path / "cache.db").extract(
-        "{instruction}",
+        "{{ instruction }}",
         image_column="image_path",
         verbose=False,
     )
@@ -124,11 +138,11 @@ def test_progress_callback_reports_completed_rows(tmp_path):
     calls = []
 
     df.llm.setup(client=client, cache_path=tmp_path / "cache.db").extract(
-        "{text}",
+        "{{ text }}",
         max_workers=2,
         progress_callback=lambda done, total: calls.append((done, total)),
         verbose=False,
     )
 
     assert calls == [(1, 2), (2, 2)]
-    assert silkloom_core.__version__ == "6.0.0"
+    assert silkloom_core.__version__ == "6.0.1"

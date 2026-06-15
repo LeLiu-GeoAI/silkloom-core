@@ -3,7 +3,7 @@
 SilkLoom Core is a small pandas accessor for batch LLM extraction.
 
 ```text
-DataFrame rows -> prompt.format(row) -> OpenAI-compatible chat call -> repaired JSON -> result DataFrame
+DataFrame rows -> Jinja prompt render -> OpenAI-compatible chat call -> repaired JSON -> result DataFrame
 ```
 
 ## Install
@@ -32,7 +32,7 @@ results = df.llm.setup(
     base_url="https://api.openai.com/v1",
     cache_path=".llm_cache.db",
 ).extract(
-    "Title: {title}\nAbstract: {abstract}\nReturn JSON with keys label and summary.",
+    "Title: {{ title }}\nAbstract: {{ abstract }}\nReturn JSON with keys label and summary.",
     model="gpt-4o-mini",
     max_workers=8,
     json_mode=True,
@@ -64,11 +64,11 @@ df.llm.setup(client=client)
 
 ## Extraction
 
-Use Python format placeholders that match DataFrame columns.
+Use Jinja placeholders that match DataFrame columns. Literal JSON braces can stay as normal braces.
 
 ```python
 out = df.llm.extract(
-    "Classify this text and return JSON: {text}",
+    'Classify {{ text }} and return JSON like {"label": "positive", "score": 0.9}',
     model="gpt-4o-mini",
     temperature=0.1,
     max_workers=4,
@@ -111,7 +111,7 @@ Use `progress_callback` for UI integration:
 def progress(done, total):
     print(done, total)
 
-out = df.llm.extract("Analyze {text}", progress_callback=progress)
+out = df.llm.extract("Analyze {{ text }}", progress_callback=progress)
 ```
 
 From another thread or UI event, call:
