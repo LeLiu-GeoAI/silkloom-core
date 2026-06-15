@@ -1,11 +1,9 @@
 # SilkLoom Core
 
-SilkLoom Core is a DataFrame-first batch runner for OpenAI-compatible LLM and VLM workloads.
-
-Its core shape is:
+SilkLoom Core is a small pandas accessor for batch LLM extraction.
 
 ```text
-indexed data -> selected input columns -> model calls -> repaired JSON -> wider DataFrame
+DataFrame rows -> prompt.format(row) -> OpenAI-compatible chat call -> repaired JSON -> result DataFrame
 ```
 
 ## Install
@@ -16,245 +14,110 @@ pip install silkloom-core
 
 ## Quick Start
 
+Importing `silkloom_core` registers `df.llm`.
+
 ```python
 import pandas as pd
-from silkloom_core import Loom
+import silkloom_core
 
-df = pd.read_csv("papers.csv")
-
-loom = Loom(
-    model="gpt-4o-mini",
-    prompt="""
-Analyze this paper and return JSON only.
-
-Title: {{ title }}
-Abstract: {{ abstract }}
-
-Return keys: sentiment, summary, keywords.
-""",
-)
-
-df = loom(
-    df,
-    input=["title", "abstract"],
-    resume="paper_analysis_v1",
-    concurrency=10,
-)
-
-df.to_csv("papers_with_analysis.csv", index=False)
-```
-
-The returned DataFrame keeps the original index and columns, then appends model output columns.
-
-## Inputs
-
-Use a pandas DataFrame:
-
-```python
-out = loom(df, input=["title", "abstract"])
-```
-
-Or a sequence of row mappings:
-
-```python
-out = loom(
-    [
-        {"text": "The experiment is promising."},
-        {"text": "The evaluation is incomplete."},
-    ],
-    input="text",
-)
-```
-
-The output is always a pandas DataFrame.
-
-## Output
-
-By default, SilkLoom expects JSON object output and expands its keys into columns.
-
-```python
-loom = Loom(
-    model="gpt-4o-mini",
-    prompt="Classify this text and return JSON with keys label and score: {{ text }}",
-)
-
-out = loom(df, input="text")
-```
-
-If the model returns:
-
-```json
-{"label": "positive", "score": 0.92}
-```
-
-SilkLoom appends:
-
-```text
-label | score
-```
-
-Malformed JSON is repaired with `json_repair.repair_json(..., return_objects=True)`.
-
-## Status Columns
-
-SilkLoom appends status columns by default:
-
-```text
-_loom_ok
-_loom_error
-_loom_checkpoint
-_loom_attempts
-```
-
-You can also include raw model output and extracted reasoning:
-
-```python
-out = loom(
-    df,
-    input="text",
-    include_output=True,
-    include_reasoning=True,
-)
-```
-
-This adds:
-
-```text
-_loom_output
-_loom_reasoning
-```
-
-Disable status columns with:
-
-```python
-out = loom(df, input="text", status=False)
-```
-
-## Progress
-
-Show a tqdm progress bar:
-
-```python
-out = loom(
-    df,
-    input="text",
-    progress=True,
-)
-```
-
-Use a custom progress label:
-
-```python
-out = loom(
-    df,
-    input="text",
-    progress="Analyzing papers",
-)
-```
-
-For UI frameworks such as Gradio, use `on_progress`. The callback receives `completed`, `total`, and the full checkpoint-style row state.
-
-```python
-import gradio as gr
-
-def analyze(file, progress=gr.Progress()):
-    df = pd.read_csv(file.name)
-
-    def update(done, total, state):
-        progress(done / total, desc=f"{done}/{total}")
-
-    return loom(
-        df,
-        input="text",
-        resume="gradio_text_analysis_v1",
-        on_progress=update,
-    )
-```
-
-## Resumable Runs
-
-Pass `resume` to enable SQLite checkpointing. SQLite is the default checkpoint backend.
-
-```python
-out = loom(
-    df,
-    input=["title", "abstract"],
-    resume="paper_analysis_v1",
-    concurrency=10,
-)
-```
-
-The checkpoint fingerprint includes the selected row input, model, prompt, system message, output schema, and model parameters.
-
-Each SQLite row stores a self-describing JSON payload with:
-
-- SilkLoom version
-- resume namespace
-- model, prompt, system message, model parameters, retry settings, and JSON repair setting
-- selected input columns and image columns
-- normalized row input, including resolved `images`
-- rendered OpenAI-compatible message payload
-- parsed JSON result
-- raw model output, extracted reasoning, error trace, attempt count, and checkpoint status
-
-To disable checkpointing:
-
-```python
-loom = Loom(..., checkpoint=None)
-```
-
-## Column Conflicts
-
-If model output columns conflict with existing DataFrame columns, SilkLoom raises. Use `prefix` when you want to keep both.
-
-```python
-out = loom(df, input="text", prefix="llm_")
-```
-
-## Images
-
-If an input row contains an `images` column, SilkLoom builds a multimodal OpenAI-compatible message. HTTP(S) and `data:image/...` URLs are passed through. Local files are converted to base64 data URLs.
-
-```python
 df = pd.DataFrame(
     {
-        "instruction": ["Extract menu item names and prices."],
-        "images": [["./receipt.jpg"]],
+        "title": ["A clear experiment", "A weak evaluation"],
+        "abstract": ["Reliable and reproducible.", "Too small to conclude much."],
     }
 )
 
-out = loom(df, input="instruction", images="images")
-```
-
-You can also pass multiple image columns:
-
-```python
-out = loom(df, input="instruction", images=["front_image", "back_image"])
-```
-
-## Custom Clients
-
-By default, `Loom` creates OpenAI SDK clients. You can also pass an existing OpenAI-compatible client:
-
-```python
-from openai import OpenAI
-from silkloom_core import Loom
-
-client = OpenAI(base_url="https://api.example.com/v1", api_key="...")
-
-loom = Loom(
-    model="provider-model",
-    prompt="{{ text }}",
-    client=client,
+results = df.llm.setup(
+    api_key="...",
+    base_url="https://api.openai.com/v1",
+    cache_path=".llm_cache.db",
+).extract(
+    "Title: {title}\nAbstract: {abstract}\nReturn JSON with keys label and summary.",
+    model="gpt-4o-mini",
+    max_workers=8,
+    json_mode=True,
 )
 ```
 
-For full control, pass an object that implements:
+`results` contains only the parsed model output columns and keeps the original index, so you can join it back when needed:
 
 ```python
-class MyClient:
-    def complete(self, *, model, messages, params) -> str: ...
-    async def acomplete(self, *, model, messages, params) -> str: ...
-    def close(self) -> None: ...
-    async def aclose(self) -> None: ...
+df = df.join(results)
 ```
+
+## Client Setup
+
+You can let SilkLoom create an OpenAI client:
+
+```python
+df.llm.setup(api_key="...", base_url="...")
+```
+
+Or pass any OpenAI-compatible client with `client.chat.completions.create(...)`:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="...", base_url="...")
+df.llm.setup(client=client)
+```
+
+## Extraction
+
+Use Python format placeholders that match DataFrame columns.
+
+```python
+out = df.llm.extract(
+    "Classify this text and return JSON: {text}",
+    model="gpt-4o-mini",
+    temperature=0.1,
+    max_workers=4,
+    max_retries=2,
+    verbose=True,
+)
+```
+
+Malformed JSON is parsed with `json_repair`. If the model returns a JSON object, its keys become columns. If it returns another JSON value, the value is placed in `_llm_raw`. Parse or request failures are returned in `_llm_error`.
+
+## Cache
+
+Successful raw responses are cached in SQLite. The cache key includes the model, rendered messages, JSON mode, and request options.
+
+```python
+df.llm.setup(cache_path="cache/llm.sqlite").extract(...)
+```
+
+Use a new cache path or delete the SQLite file when you want a fresh run.
+
+## Images
+
+Pass `image_column` for local image paths, HTTP(S) image URLs, or existing `data:image/...` URLs. Local files are encoded as base64 data URLs.
+
+```python
+out = df.llm.extract(
+    "Extract fields from this receipt and return JSON.",
+    image_column="receipt_path",
+    model="gpt-4o-mini",
+)
+```
+
+Rows with missing image values fall back to text-only prompts.
+
+## Progress And Cancel
+
+Use `progress_callback` for UI integration:
+
+```python
+def progress(done, total):
+    print(done, total)
+
+out = df.llm.extract("Analyze {text}", progress_callback=progress)
+```
+
+From another thread or UI event, call:
+
+```python
+df.llm.cancel()
+```
+
+Queued work is cancelled where possible, and running rows stop before the next retry.

@@ -1,14 +1,10 @@
-__version__ = "5.0.2"
+__version__ = "6.0.0"
 
-from .checkpoint import ResultStore, RunFingerprint, SQLiteCheckpoint
-from .clients import ChatClient, OpenAIChat
-from .taskloom import Loom
+from .taskloom import PandasLLMAccessor, SQLiteCache, encode_image_to_base64, image_to_data_url
 
 __all__ = [
-    "ChatClient",
-    "Loom",
-    "OpenAIChat",
-    "ResultStore",
-    "RunFingerprint",
-    "SQLiteCheckpoint",
+    "PandasLLMAccessor",
+    "SQLiteCache",
+    "encode_image_to_base64",
+    "image_to_data_url",
 ]

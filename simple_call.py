@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 from openai import OpenAI
 
-from silkloom_core import Loom
+import silkloom_core
 
 
 def load_env(path: str = ".env") -> None:
@@ -39,23 +39,14 @@ def main() -> None:
         }
     )
 
-    loom = Loom(
+    extracted = df.llm.setup(client=client).extract(
+        "Analyze the text and return JSON with keys sentiment, summary, and keywords. Text: {text}",
         model=os.getenv("MODEL", "gpt-4o-mini"),
-        prompt=(
-            "Analyze the text and return JSON only with keys "
-            "sentiment, summary, and keywords. Text: {{ text }}"
-        ),
-        client=client,
         temperature=0.1,
+        max_workers=3,
     )
 
-    out = loom(
-        df,
-        input="text",
-        resume="simple_text_analysis_v1",
-        concurrency=3,
-    )
-    print(out)
+    print(df.join(extracted))
 
 
 if __name__ == "__main__":
