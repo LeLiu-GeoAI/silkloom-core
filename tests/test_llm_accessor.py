@@ -189,11 +189,12 @@ def test_setup_does_not_create_database_file(tmp_path):
     client = FakeClient(['{"value":"ok"}'])
     df = pd.DataFrame({"text": ["hello"]})
 
-    df.llm.setup(client=client, cache_path=cache_path)
+    llm = df.llm
+    llm.setup(client=client, cache_path=cache_path)
 
     assert not cache_path.exists(), "setup() should not create the database file"
 
-    df.llm.extract("{{ text }}", verbose=False)
+    llm.extract("{{ text }}", verbose=False)
 
     assert cache_path.exists(), "extract() should create the database file"
 
