@@ -6,3 +6,9 @@ dist/
 .venv/
 .env
 *.db
+*.sqlite
+*.sqlite3
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.workbuddy/

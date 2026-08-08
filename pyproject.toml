@@ -4,28 +4,29 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "silkloom-core"
-version = "5.0.2"
-description = "SilkLoom Core: DataFrame-first batch runner for LLM and VLM workloads"
+version = "7.0.0"
+description = "A lightweight pandas accessor for batch OpenAI-compatible LLM extraction"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "openai>=1.40.0",
   "jinja2>=3.1.0",
   "json-repair>=0.39.1",
-  "pandas>=2.0"
+  "pandas>=2.0",
 ]
 authors = [
   { name = "SilkLoom Core Contributors" }
 ]
 license = "MIT"
-keywords = ["llm", "pipeline", "workflow", "batch-processing", "silkloom"]
+keywords = ["llm", "pipeline", "workflow", "batch-processing", "pandas", "silkloom"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Software Development :: Libraries",
 ]
 
@@ -33,11 +34,9 @@ classifiers = [
 progress = [
   "tqdm>=4.66.0",
 ]
-full = [
-  "tqdm>=4.66.0",
-]
 dev = [
   "build>=1.2.1",
+  "pytest>=8.0",
   "twine>=5.1.1",
 ]
 
