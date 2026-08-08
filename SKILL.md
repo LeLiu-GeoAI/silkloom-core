@@ -1,7 +1,7 @@
 ---
 name: silkloom-core
 description: Batch LLM extraction on pandas DataFrames. Use when the user wants to run LLM extraction, classification, or structured-data extraction across many rows of a DataFrame concurrently, with caching and JSON parsing.
-version: 1.1.0
+version: 7.1.0
 ---
 
 # SilkLoom Core

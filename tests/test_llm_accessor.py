@@ -294,7 +294,7 @@ def test_progress_callback_reports_completed_rows(tmp_path):
     )
 
     assert calls == [(1, 2), (2, 2)]
-    assert silkloom_core.__version__ == "7.0.0"
+    assert silkloom_core.__version__ == "7.1.0"
 
 
 # --------------------------------------------------------------------------- #
