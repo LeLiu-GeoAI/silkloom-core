@@ -1,19 +1,14 @@
-__version__ = "7.0.0"
+__version__ = "5.0.2"
 
-from .taskloom import (
-    DEFAULT_SYSTEM_PROMPT,
-    PandasLLMAccessor,
-    SQLiteCache,
-    configure,
-    encode_image_to_base64,
-    image_to_data_url,
-)
+from .checkpoint import ResultStore, RunFingerprint, SQLiteCheckpoint
+from .clients import ChatClient, OpenAIChat
+from .taskloom import Loom
 
 __all__ = [
-    "DEFAULT_SYSTEM_PROMPT",
-    "PandasLLMAccessor",
-    "SQLiteCache",
-    "configure",
-    "encode_image_to_base64",
-    "image_to_data_url",
+    "ChatClient",
+    "Loom",
+    "OpenAIChat",
+    "ResultStore",
+    "RunFingerprint",
+    "SQLiteCheckpoint",
 ]
