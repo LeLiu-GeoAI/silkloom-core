@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 import silkloom_core
 
+
+# --------------------------------------------------------------------------- #
+# Test helpers
+# --------------------------------------------------------------------------- #
 
 class FakeResponse:
     def __init__(self, content: str):
@@ -50,6 +57,20 @@ class FailingClient:
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.chat_impl.create))
 
 
+def _save_globals():
+    import silkloom_core.taskloom as tl
+    return tl._DEFAULT_CLIENT, tl._DEFAULT_CACHE_PATH
+
+
+def _restore_globals(saved):
+    import silkloom_core.taskloom as tl
+    tl._DEFAULT_CLIENT, tl._DEFAULT_CACHE_PATH = saved
+
+
+# --------------------------------------------------------------------------- #
+# Core extraction
+# --------------------------------------------------------------------------- #
+
 def test_accessor_extracts_json_to_result_frame(tmp_path):
     client = FakeClient(['{"sentiment":"positive","score":0.9}', '{"sentiment":"neutral","score":0.5}'])
     df = pd.DataFrame(
@@ -69,6 +90,22 @@ def test_accessor_extracts_json_to_result_frame(tmp_path):
     assert list(out["score"]) == [0.9, 0.5]
     assert client.chat_impl.calls[0]["model"] == "test-model"
 
+
+def test_empty_dataframe_returns_empty_frame_with_same_index(tmp_path):
+    client = FakeClient([])
+    df = pd.DataFrame({"text": []}, index=[])
+
+    out = df.llm.setup(client=client, cache_path=tmp_path / "cache.db").extract(
+        "{{ text }}", verbose=False
+    )
+
+    assert out.empty
+    assert list(out.index) == []
+
+
+# --------------------------------------------------------------------------- #
+# Cache behavior
+# --------------------------------------------------------------------------- #
 
 def test_cache_reuses_successful_response(tmp_path):
     db = tmp_path / "cache.db"
@@ -109,10 +146,10 @@ def test_cache_records_request_and_parsed_result(tmp_path):
             """
         ).fetchone()
 
-    messages = json_loads(row[2])
-    params = json_loads(row[3])
-    request = json_loads(row[4])
-    parsed = json_loads(row[6])
+    messages = json.loads(row[2])
+    params = json.loads(row[3])
+    request = json.loads(row[4])
+    parsed = json.loads(row[6])
 
     assert row[0] == 1
     assert row[1] == "audit-model"
@@ -146,6 +183,25 @@ def test_cache_records_failed_request_without_cache_hit(tmp_path):
     assert row[3] == 1
 
 
+def test_setup_does_not_create_database_file(tmp_path):
+    """setup() should be lazy — no SQLite file until extract() is called."""
+    cache_path = tmp_path / "lazy.db"
+    client = FakeClient(['{"value":"ok"}'])
+    df = pd.DataFrame({"text": ["hello"]})
+
+    df.llm.setup(client=client, cache_path=cache_path)
+
+    assert not cache_path.exists(), "setup() should not create the database file"
+
+    df.llm.extract("{{ text }}", verbose=False)
+
+    assert cache_path.exists(), "extract() should create the database file"
+
+
+# --------------------------------------------------------------------------- #
+# JSON parsing
+# --------------------------------------------------------------------------- #
+
 def test_dirty_json_is_repaired(tmp_path):
     client = FakeClient(['{"name": "Ada", "skills": ["Python",]}'])
     df = pd.DataFrame({"text": ["profile"]})
@@ -165,6 +221,20 @@ def test_non_object_json_returns_raw_column(tmp_path):
     assert out.loc[0, "_llm_raw"] == "not json"
 
 
+def test_parse_error_includes_raw_content(tmp_path):
+    """When json_repair raises, _llm_error and _llm_raw should both be present."""
+    import silkloom_core.taskloom as tl
+    from unittest.mock import patch
+
+    accessor = pd.DataFrame({"text": ["x"]}).llm
+    with patch.object(tl.json_repair, "loads", side_effect=ValueError("bad json")):
+        result = accessor._parse_content("some content")
+    assert "_llm_error" in result
+    assert "_llm_raw" in result
+    assert "bad json" in result["_llm_error"]
+    assert result["_llm_raw"] == "some content"
+
+
 def test_prompt_can_contain_literal_json_braces(tmp_path):
     client = FakeClient(['{"label":"ok"}'])
     df = pd.DataFrame({"text": ["hello"]})
@@ -178,6 +248,9 @@ def test_prompt_can_contain_literal_json_braces(tmp_path):
     assert prompt == 'Read hello and return JSON like {"label": "short"}'
 
 
+# --------------------------------------------------------------------------- #
+# Multimodal
+# --------------------------------------------------------------------------- #
 
 def test_image_column_builds_multimodal_message(tmp_path):
     image = tmp_path / "image.png"
@@ -204,6 +277,10 @@ def test_image_column_builds_multimodal_message(tmp_path):
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
+# --------------------------------------------------------------------------- #
+# Progress and cancel
+# --------------------------------------------------------------------------- #
+
 def test_progress_callback_reports_completed_rows(tmp_path):
     client = FakeClient(['{"value":"one"}', '{"value":"two"}'])
     df = pd.DataFrame({"text": ["one", "two"]})
@@ -217,10 +294,82 @@ def test_progress_callback_reports_completed_rows(tmp_path):
     )
 
     assert calls == [(1, 2), (2, 2)]
-    assert silkloom_core.__version__ == "6.0.2"
+    assert silkloom_core.__version__ == "7.0.0"
 
 
-def json_loads(value):
-    import json
+# --------------------------------------------------------------------------- #
+# Client configuration layers
+# --------------------------------------------------------------------------- #
 
-    return json.loads(value)
+def test_configure_provides_default_client(tmp_path):
+    client = FakeClient(['{"value":"global"}'])
+    saved = _save_globals()
+    try:
+        silkloom_core.configure(client=client, cache_path=tmp_path / "cache.db")
+        df = pd.DataFrame({"text": ["hello"]})
+        out = df.llm.extract("{{ text }}", verbose=False)
+        assert out.loc[0, "value"] == "global"
+    finally:
+        _restore_globals(saved)
+
+
+def test_configure_raises_without_client_or_api_key():
+    with pytest.raises(ValueError, match="requires either client"):
+        silkloom_core.configure()
+
+
+def test_extract_raises_without_client():
+    saved = _save_globals()
+    import silkloom_core.taskloom as tl
+    tl._DEFAULT_CLIENT = None
+    try:
+        df = pd.DataFrame({"text": ["hello"]})
+        with pytest.raises(RuntimeError, match="No LLM client configured"):
+            df.llm.extract("{{ text }}", verbose=False)
+    finally:
+        _restore_globals(saved)
+
+
+def test_setup_overrides_configure(tmp_path):
+    global_client = FakeClient(['{"value":"global"}'])
+    local_client = FakeClient(['{"value":"local"}'])
+    saved = _save_globals()
+    try:
+        silkloom_core.configure(client=global_client, cache_path=tmp_path / "global.db")
+        df = pd.DataFrame({"text": ["hello"]})
+        out = df.llm.setup(client=local_client, cache_path=tmp_path / "local.db").extract(
+            "{{ text }}", verbose=False
+        )
+        assert out.loc[0, "value"] == "local"
+        assert len(global_client.chat_impl.calls) == 0
+        assert len(local_client.chat_impl.calls) == 1
+    finally:
+        _restore_globals(saved)
+
+
+def test_extract_client_overrides_configure(tmp_path):
+    global_client = FakeClient(['{"value":"global"}'])
+    call_client = FakeClient(['{"value":"per-call"}'])
+    saved = _save_globals()
+    try:
+        silkloom_core.configure(client=global_client, cache_path=tmp_path / "global.db")
+        df = pd.DataFrame({"text": ["hello"]})
+        out = df.llm.extract("{{ text }}", client=call_client, verbose=False)
+        assert out.loc[0, "value"] == "per-call"
+        assert len(global_client.chat_impl.calls) == 0
+        assert len(call_client.chat_impl.calls) == 1
+    finally:
+        _restore_globals(saved)
+
+
+def test_extract_client_overrides_setup(tmp_path):
+    setup_client = FakeClient(['{"value":"setup"}'])
+    call_client = FakeClient(['{"value":"per-call"}'])
+    df = pd.DataFrame({"text": ["hello"]})
+
+    out = df.llm.setup(client=setup_client, cache_path=tmp_path / "cache.db").extract(
+        "{{ text }}", client=call_client, verbose=False
+    )
+    assert out.loc[0, "value"] == "per-call"
+    assert len(setup_client.chat_impl.calls) == 0
+    assert len(call_client.chat_impl.calls) == 1

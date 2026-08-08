@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,16 +17,71 @@ import pandas as pd
 from jinja2 import StrictUndefined, Template
 from openai import OpenAI
 
+__all__ = [
+    "DEFAULT_SYSTEM_PROMPT",
+    "configure",
+    "encode_image_to_base64",
+    "image_to_data_url",
+    "SQLiteCache",
+    "PandasLLMAccessor",
+]
 
 DEFAULT_SYSTEM_PROMPT = "Please output valid JSON only."
+DEFAULT_MODEL = "gpt-4o-mini"
+
+_DEFAULT_CLIENT: Any | None = None
+_DEFAULT_CACHE_PATH: str | Path = ".llm_cache.db"
+
+
+def configure(
+    api_key: str | None = None,
+    base_url: str | None = None,
+    *,
+    cache_path: str | Path = ".llm_cache.db",
+    client: Any | None = None,
+    **client_options: Any,
+) -> None:
+    """Configure global defaults for all DataFrames.
+
+    Call once at the start of a script. Subsequent ``df.llm.extract(...)``
+    calls will use this client and cache without needing per-DataFrame setup.
+
+    Per-DataFrame ``df.llm.setup(...)`` and per-call ``extract(client=...)``
+    override these defaults.
+
+    Parameters
+    ----------
+    api_key, base_url
+        Credentials for creating an :class:`openai.OpenAI` client.
+    cache_path
+        SQLite file path for the response cache.
+    client
+        A pre-built OpenAI-compatible client. Takes priority over *api_key*/*base_url*.
+    **client_options
+        Extra keyword arguments forwarded to :class:`openai.OpenAI`.
+
+    Raises
+    ------
+    ValueError
+        If neither *client* nor *api_key* is provided.
+    """
+    if client is None and api_key is None:
+        raise ValueError(
+            "configure() requires either client=... or api_key=..."
+        )
+    global _DEFAULT_CLIENT, _DEFAULT_CACHE_PATH
+    _DEFAULT_CLIENT = client or OpenAI(api_key=api_key, base_url=base_url, **client_options)
+    _DEFAULT_CACHE_PATH = cache_path
 
 
 def encode_image_to_base64(path: str | Path) -> str:
+    """Read an image file and return its base64-encoded string."""
     with Path(path).open("rb") as image:
         return base64.b64encode(image.read()).decode("ascii")
 
 
 def image_to_data_url(path: str | Path) -> str:
+    """Convert a local image file to a ``data:image/...;base64,...`` URL."""
     image_path = Path(path)
     if not image_path.exists() or not image_path.is_file():
         raise FileNotFoundError(f"Image not found: {image_path}")
@@ -35,11 +91,16 @@ def image_to_data_url(path: str | Path) -> str:
 
 
 class SQLiteCache:
+    """SQLite-backed response cache with full audit trail."""
+
     def __init__(self, path: str | Path = ".llm_cache.db"):
         self.path = Path(path)
+        if self.path.parent and not self.path.parent.exists():
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
 
     def get(self, key: str) -> str | None:
+        """Return cached response text for *key*, or ``None`` on miss / prior failure."""
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT response FROM cache WHERE cache_key = ? AND ok = 1",
@@ -58,6 +119,7 @@ class SQLiteCache:
         ok: bool = False,
         attempts: int = 0,
     ) -> None:
+        """Insert or update a cache row with full request/response audit data."""
         params = {name: value for name, value in request.items() if name not in {"model", "messages"}}
         with self._connect() as conn:
             conn.execute(
@@ -103,15 +165,13 @@ class SQLiteCache:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        if self.path.parent and not self.path.parent.exists():
-            self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path)
-        conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA busy_timeout=5000;")
         return conn
 
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS cache (
@@ -152,12 +212,30 @@ class SQLiteCache:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
+@dataclass
+class _ExtractConfig:
+    client: Any
+    template: Template
+    image_column: str | None
+    system_prompt: str | None
+    model: str
+    json_mode: bool
+    max_retries: int
+    request_options: dict[str, Any]
+
+
 @pd.api.extensions.register_dataframe_accessor("llm")
 class PandasLLMAccessor:
+    """Pandas accessor (``df.llm``) for batch LLM extraction.
+
+    Registered automatically when :mod:`silkloom_core` is imported.
+    """
+
     def __init__(self, pandas_obj: pd.DataFrame):
         self._obj = pandas_obj
         self._client: Any | None = None
-        self._cache = SQLiteCache()
+        self._cache: SQLiteCache | None = None
+        self._cache_path: str | Path | None = None
         self._cancel_event = threading.Event()
 
     def setup(
@@ -168,21 +246,35 @@ class PandasLLMAccessor:
         cache_path: str | Path = ".llm_cache.db",
         client: Any | None = None,
         **client_options: Any,
-    ) -> PandasLLMAccessor:
+    ) -> "PandasLLMAccessor":
+        """Configure the LLM client and cache path for this DataFrame.
+
+        Returns ``self`` so you can chain ``df.llm.setup(...).extract(...)``.
+
+        The SQLite database is **not** created until the first ``extract()``
+        call — ``setup()`` only stores the configuration.
+        """
         self._client = client or OpenAI(api_key=api_key, base_url=base_url, **client_options)
-        self._cache = SQLiteCache(cache_path)
+        self._cache_path = cache_path
+        self._cache = None
         return self
 
     def cancel(self) -> None:
+        """Signal all in-flight and queued rows to stop.
+
+        Safe to call from another thread. Running rows stop before their
+        next retry. Already-completed results are preserved.
+        """
         self._cancel_event.set()
 
     def extract(
         self,
         prompt_template: str,
         *,
+        client: Any | None = None,
         image_column: str | None = None,
         system_prompt: str | None = DEFAULT_SYSTEM_PROMPT,
-        model: str = "gpt-3.5-turbo",
+        model: str = DEFAULT_MODEL,
         max_workers: int = 4,
         json_mode: bool = False,
         max_retries: int = 2,
@@ -190,13 +282,73 @@ class PandasLLMAccessor:
         verbose: bool = True,
         **request_options: Any,
     ) -> pd.DataFrame:
-        if self._client is None:
-            self._client = OpenAI()
+        """Run batch LLM extraction on every row and return a result DataFrame.
+
+        Parameters
+        ----------
+        prompt_template
+            Jinja2 template string. Column names are available as variables.
+        client
+            Per-call client override (e.g. a different provider).
+            Priority: ``extract(client=)`` > ``setup(client=)`` > ``configure(client=)``.
+        image_column
+            Column with image paths / URLs for multimodal input.
+        system_prompt
+            System message. Pass ``None`` to omit. Defaults to a JSON-only instruction.
+        model
+            Model name passed to the API.
+        max_workers
+            Thread pool size for concurrent API calls.
+        json_mode
+            If ``True``, sets ``response_format={"type": "json_object"}``.
+        max_retries
+            Number of retries on API errors (exponential backoff).
+        progress_callback
+            ``callback(completed, total)`` called after each row finishes.
+        verbose
+            Show a tqdm progress bar.
+        **request_options
+            Extra kwargs forwarded to ``client.chat.completions.create()``.
+
+        Returns
+        -------
+        pd.DataFrame
+            One row per input row, same index. JSON object keys become
+            columns; non-object values go to ``_llm_raw``; errors go to
+            ``_llm_error``.
+
+        Raises
+        ------
+        RuntimeError
+            If no client is configured (no ``configure``, ``setup``, or ``client=``).
+        KeyError
+            If *image_column* is not found in the DataFrame.
+        """
+        resolved_client = client or self._client or _DEFAULT_CLIENT
+        if resolved_client is None:
+            raise RuntimeError(
+                "No LLM client configured. "
+                "Call silkloom_core.configure(client=...) once, "
+                "or df.llm.setup(client=...) before extract(), "
+                "or pass client=... to extract()."
+            )
+
+        if self._cache is None:
+            self._cache = SQLiteCache(self._cache_path or _DEFAULT_CACHE_PATH)
 
         if image_column is not None and image_column not in self._obj.columns:
             raise KeyError(f"Image column not found: {image_column}")
 
-        template = Template(prompt_template, undefined=StrictUndefined)
+        config = _ExtractConfig(
+            client=resolved_client,
+            template=Template(prompt_template, undefined=StrictUndefined),
+            image_column=image_column,
+            system_prompt=system_prompt,
+            model=model,
+            json_mode=json_mode,
+            max_retries=max_retries,
+            request_options=request_options,
+        )
 
         self._cancel_event.clear()
         total = len(self._obj)
@@ -205,17 +357,7 @@ class PandasLLMAccessor:
 
         with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
             futures = {
-                pool.submit(
-                    self._process_row,
-                    row,
-                    template,
-                    image_column,
-                    system_prompt,
-                    model,
-                    json_mode,
-                    max_retries,
-                    request_options,
-                ): index
+                pool.submit(self._process_row, row, config): index
                 for index, row in self._obj.iterrows()
             }
 
@@ -250,25 +392,19 @@ class PandasLLMAccessor:
     def _process_row(
         self,
         row: pd.Series,
-        prompt_template: Template,
-        image_column: str | None,
-        system_prompt: str | None,
-        model: str,
-        json_mode: bool,
-        max_retries: int,
-        request_options: dict[str, Any],
+        config: _ExtractConfig,
     ) -> dict[str, Any]:
         if self._cancel_event.is_set():
             return {"_llm_error": "Cancelled by user"}
 
         try:
-            user_prompt = prompt_template.render(**row.to_dict())
-            messages = self._messages(row, user_prompt, image_column, system_prompt)
+            user_prompt = config.template.render(**row.to_dict())
+            messages = self._messages(row, user_prompt, config.image_column, config.system_prompt)
         except Exception as exc:
             return {"_llm_error": str(exc)}
 
-        request = {"model": model, "messages": messages, **request_options}
-        if json_mode:
+        request = {"model": config.model, "messages": messages, **config.request_options}
+        if config.json_mode:
             request["response_format"] = {"type": "json_object"}
 
         cache_key = self._cache_key(request)
@@ -277,12 +413,12 @@ class PandasLLMAccessor:
             return self._parse_content(cached)
 
         last_error: str | None = None
-        for attempt in range(max_retries + 1):
+        for attempt in range(config.max_retries + 1):
             if self._cancel_event.is_set():
                 return {"_llm_error": "Cancelled by user"}
 
             try:
-                response = self._client.chat.completions.create(**request)
+                response = config.client.chat.completions.create(**request)
                 raw_content = self._response_text(response)
                 parsed = self._parse_content(raw_content)
                 self._cache.put(
@@ -297,17 +433,17 @@ class PandasLLMAccessor:
                 return parsed
             except Exception as exc:
                 last_error = str(exc)
-                if attempt < max_retries:
+                if attempt < config.max_retries:
                     time.sleep(2**attempt)
 
-        error_result = {"_llm_error": f"Failed after {max_retries} retries. Error: {last_error}"}
+        error_result = {"_llm_error": f"Failed after {config.max_retries} retries. Error: {last_error}"}
         self._cache.put(
             cache_key,
             request=request,
             parsed=error_result,
             error=error_result["_llm_error"],
             ok=False,
-            attempts=max_retries + 1,
+            attempts=config.max_retries + 1,
         )
         return error_result
 
@@ -345,7 +481,7 @@ class PandasLLMAccessor:
         try:
             parsed = json_repair.loads(raw_content)
         except Exception as exc:
-            return {"_llm_error": f"Parse Error: {exc}", "_raw_content": raw_content}
+            return {"_llm_error": f"Parse Error: {exc}", "_llm_raw": raw_content}
 
         if isinstance(parsed, dict):
             return parsed

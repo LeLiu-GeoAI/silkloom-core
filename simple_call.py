@@ -1,34 +1,18 @@
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 import pandas as pd
 from openai import OpenAI
 
 import silkloom_core
 
 
-def load_env(path: str = ".env") -> None:
-    env = Path(path)
-    if not env.exists():
-        return
-
-    for line in env.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-
-
 def main() -> None:
-    load_env()
-
     client = OpenAI(
-        api_key=os.environ["OPENAI_API_KEY"],
-        base_url=os.getenv("BASE_URL"),
+        api_key="071ab49a8174143d6cc2a19d287b61ee.BenBTW0a0JlkeVmJ",
+        base_url="https://open.bigmodel.cn/api/paas/v4/",
     )
+
+    silkloom_core.configure(client=client)
 
     df = pd.DataFrame(
         {
@@ -39,9 +23,9 @@ def main() -> None:
         }
     )
 
-    extracted = df.llm.setup(client=client).extract(
-        "Analyze the text and return JSON with keys sentiment, summary, and keywords. Text: {text}",
-        model=os.getenv("MODEL", "gpt-4o-mini"),
+    extracted = df.llm.extract(
+        "Analyze the text and return JSON with keys sentiment, summary, and keywords. Text: {{ text }}",
+        model="glm-4-flash",
         temperature=0.1,
         max_workers=3,
     )

@@ -1,10 +1,19 @@
-__version__ = "6.0.2"
+__version__ = "7.0.0"
 
-from .taskloom import PandasLLMAccessor, SQLiteCache, encode_image_to_base64, image_to_data_url
+from .taskloom import (
+    DEFAULT_SYSTEM_PROMPT,
+    PandasLLMAccessor,
+    SQLiteCache,
+    configure,
+    encode_image_to_base64,
+    image_to_data_url,
+)
 
 __all__ = [
+    "DEFAULT_SYSTEM_PROMPT",
     "PandasLLMAccessor",
     "SQLiteCache",
+    "configure",
     "encode_image_to_base64",
     "image_to_data_url",
 ]

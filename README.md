@@ -1,70 +1,134 @@
 # SilkLoom Core
 
-SilkLoom Core is a small pandas accessor for batch LLM extraction.
+A lightweight pandas accessor for batch LLM extraction.
 
 ```text
-DataFrame rows -> Jinja prompt render -> OpenAI-compatible chat call -> repaired JSON -> result DataFrame
+DataFrame rows → Jinja2 prompt render → OpenAI-compatible API → repaired JSON → result DataFrame
 ```
+
+One call — `df.llm.extract(template)` — concurrently sends every row to an LLM, parses the JSON response, and returns a DataFrame you can `join` back to the original.
+
+## Table of Contents
+
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+  - [Global Configuration](#global-configuration)
+  - [Per-DataFrame Setup](#per-dataframe-setup)
+  - [Per-Call Client](#per-call-client)
+  - [Priority Chain](#priority-chain)
+- [Extraction](#extraction)
+  - [Prompt Templates](#prompt-templates)
+  - [Result Columns](#result-columns)
+- [Cache and Audit](#cache-and-audit)
+- [Images](#images)
+- [Progress and Cancel](#progress-and-cancel)
+- [API Reference](#api-reference)
 
 ## Install
 
 ```bash
 pip install silkloom-core
+
+# optional: progress bar
+pip install silkloom-core[progress]
 ```
 
-## Quick Start
+Importing `silkloom_core` registers the `df.llm` accessor on every DataFrame.
 
-Importing `silkloom_core` registers `df.llm`.
+## Quick Start
 
 ```python
 import pandas as pd
 import silkloom_core
+from openai import OpenAI
 
-df = pd.DataFrame(
-    {
-        "title": ["A clear experiment", "A weak evaluation"],
-        "abstract": ["Reliable and reproducible.", "Too small to conclude much."],
-    }
+silkloom_core.configure(
+    client=OpenAI(api_key="...", base_url="https://api.openai.com/v1"),
+    cache_path=".llm_cache.db",
 )
 
-results = df.llm.setup(
-    api_key="...",
-    base_url="https://api.openai.com/v1",
-    cache_path=".llm_cache.db",
-).extract(
+df = pd.DataFrame({
+    "title": ["A clear experiment", "A weak evaluation"],
+    "abstract": ["Reliable and reproducible.", "Too small to conclude much."],
+})
+
+results = df.llm.extract(
     "Title: {{ title }}\nAbstract: {{ abstract }}\nReturn JSON with keys label and summary.",
     model="gpt-4o-mini",
     max_workers=8,
     json_mode=True,
 )
-```
 
-`results` contains only the parsed model output columns and keeps the original index, so you can join it back when needed:
-
-```python
 df = df.join(results)
 ```
 
-## Client Setup
+## Configuration
 
-You can let SilkLoom create an OpenAI client:
+SilkLoom supports three layers of client configuration, from broadest to narrowest.
+
+### Global Configuration
+
+Configure once at the start of a script — every DataFrame can call `extract()` directly:
 
 ```python
-df.llm.setup(api_key="...", base_url="...")
+silkloom_core.configure(
+    api_key="...",
+    base_url="https://api.openai.com/v1",
+    cache_path=".llm_cache.db",
+)
+
+# Or pass a pre-built client:
+silkloom_core.configure(client=OpenAI(api_key="...", base_url="..."))
 ```
 
-Or pass any OpenAI-compatible client with `client.chat.completions.create(...)`:
+### Per-DataFrame Setup
+
+Override the global default for a specific DataFrame:
+
+```python
+df.llm.setup(
+    api_key="...",
+    base_url="...",
+    cache_path="special_cache.db",
+)
+
+# Chain directly into extract:
+df.llm.setup(client=client).extract("...", model="gpt-4o-mini")
+```
+
+### Per-Call Client
+
+Override the client for a single `extract()` call — useful for mixing providers:
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(api_key="...", base_url="...")
-df.llm.setup(client=client)
+openai_client = OpenAI(api_key="...", base_url="https://api.openai.com/v1")
+zhipu_client = OpenAI(api_key="...", base_url="https://open.bigmodel.cn/api/paas/v4")
+
+silkloom_core.configure(client=openai_client)
+
+# Same DataFrame, different providers:
+df.llm.extract("...", model="gpt-4o")                          # → OpenAI
+df.llm.extract("...", model="glm-4-flash", client=zhipu_client) # → Zhipu
 ```
+
+### Priority Chain
+
+```
+extract(client=...)  >  df.llm.setup(client=...)  >  silkloom_core.configure(client=...)  >  error
+```
+
+If no client is configured, `extract()` raises `RuntimeError` with a clear message.
+
+> **Note:** The SQLite cache file is created lazily — only on the first `extract()` call, never as a side effect of `configure()` or `setup()`.
 
 ## Extraction
 
-Use Jinja placeholders that match DataFrame columns. Literal JSON braces can stay as normal braces.
+### Prompt Templates
+
+Prompts use [Jinja2](https://jinja.palletsprojects.com/) with `StrictUndefined` — typos in column names raise immediately instead of silently producing empty strings. Literal JSON braces (`{` `}`) are safe; only `{{ }}` is treated as a template expression.
 
 ```python
 out = df.llm.extract(
@@ -73,40 +137,52 @@ out = df.llm.extract(
     temperature=0.1,
     max_workers=4,
     max_retries=2,
-    verbose=True,
 )
 ```
 
-Malformed JSON is parsed with `json_repair`. If the model returns a JSON object, its keys become columns. If it returns another JSON value, the value is placed in `_llm_raw`. Parse or request failures are returned in `_llm_error`.
+### Result Columns
 
-## Cache And Audit Records
+The returned DataFrame has the same index as the input. Column semantics:
 
-SQLite stores successful responses for cache reuse and also keeps richer request records for inspection. The cache key includes the model, rendered messages, JSON mode, and request options.
+| Condition | Column(s) |
+|---|---|
+| Model returns a JSON object | Each key becomes a column |
+| Model returns a non-object JSON value | `_llm_raw` |
+| JSON parse fails | `_llm_error` + `_llm_raw` |
+| API call fails after all retries | `_llm_error` |
+
+Malformed JSON is repaired with [`json_repair`](https://github.com/mangiucugna/json_repair) before parsing.
+
+## Cache and Audit
+
+Every API call is recorded in a SQLite database. Successful responses (`ok = 1`) are reused as cache hits on subsequent runs with the same request. Failed requests are also stored for debugging but are retried next time.
 
 ```python
 df.llm.setup(cache_path="cache/llm.sqlite").extract(...)
 ```
 
-The `cache` table includes:
+The `cache` table schema:
 
-- `cache_key`
-- `ok`
-- `model`
-- `messages_json`
-- `params_json`
-- `request_json`
-- `response`
-- `parsed_json`
-- `error`
-- `attempts`
-- `created_at`
-- `updated_at`
+| Column | Type | Description |
+|---|---|---|
+| `cache_key` | TEXT PK | SHA-256 of the full request |
+| `ok` | INTEGER | 1 = success (cacheable), 0 = failure |
+| `model` | TEXT | Model name used |
+| `messages_json` | TEXT | Rendered messages array |
+| `params_json` | TEXT | Request params (excluding model/messages) |
+| `request_json` | TEXT | Full request payload |
+| `response` | TEXT | Raw model response text |
+| `parsed_json` | TEXT | Parsed result dict |
+| `error` | TEXT | Error message (NULL on success) |
+| `attempts` | INTEGER | Number of attempts made |
+| `created_at` | TEXT | Row creation timestamp |
+| `updated_at` | TEXT | Last update timestamp |
 
-Only rows with `ok = 1` are reused as cache hits. Failed requests and parse errors are recorded for debugging but are retried on the next run. Use a new cache path or delete the SQLite file when you want a fresh run.
+To start fresh: delete the SQLite file or use a different `cache_path`.
 
 ## Images
 
-Pass `image_column` for local image paths, HTTP(S) image URLs, or existing `data:image/...` URLs. Local files are encoded as base64 data URLs.
+Pass `image_column` for local file paths, HTTP(S) URLs, or `data:image/...` URLs. Local files are auto-encoded as base64 data URLs with MIME detection. A single cell can hold a list of images for multi-image input.
 
 ```python
 out = df.llm.extract(
@@ -116,23 +192,61 @@ out = df.llm.extract(
 )
 ```
 
-Rows with missing image values fall back to text-only prompts.
+Rows with missing image values (`NaN`, `None`) fall back to text-only prompts.
 
-## Progress And Cancel
+## Progress and Cancel
 
-Use `progress_callback` for UI integration:
+**Progress bar** — tqdm is used when `verbose=True` (default). If tqdm isn't installed, it degrades silently.
+
+**Callback** — for UI integration:
 
 ```python
 def progress(done, total):
-    print(done, total)
+    print(f"{done}/{total}")
 
 out = df.llm.extract("Analyze {{ text }}", progress_callback=progress)
 ```
 
-From another thread or UI event, call:
+**Cancel** — from another thread:
 
 ```python
 df.llm.cancel()
 ```
 
-Queued work is cancelled where possible, and running rows stop before the next retry.
+Queued work is cancelled where possible. Running rows stop before their next retry. Already-completed results are preserved in the returned DataFrame.
+
+## API Reference
+
+### `silkloom_core.configure(...)`
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `api_key` | `str \| None` | `None` | API key for OpenAI client |
+| `base_url` | `str \| None` | `None` | API base URL |
+| `cache_path` | `str \| Path` | `".llm_cache.db"` | SQLite cache file path |
+| `client` | `Any \| None` | `None` | Pre-built client (overrides api_key/base_url) |
+| `**client_options` | | | Extra kwargs for `OpenAI()` |
+
+### `df.llm.setup(...)`
+
+Same parameters as `configure()`. Returns `self` for chaining.
+
+### `df.llm.extract(prompt_template, *, ...)`
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `prompt_template` | `str` | — | Jinja2 template (required) |
+| `client` | `Any \| None` | `None` | Per-call client override |
+| `image_column` | `str \| None` | `None` | Column with image paths/URLs |
+| `system_prompt` | `str \| None` | `"Please output valid JSON only."` | System message; `None` to omit |
+| `model` | `str` | `"gpt-4o-mini"` | Model name |
+| `max_workers` | `int` | `4` | Concurrent API call threads |
+| `json_mode` | `bool` | `False` | Set `response_format={"type":"json_object"}` |
+| `max_retries` | `int` | `2` | Retries on API error (exponential backoff) |
+| `progress_callback` | `Callable[[int, int], None] \| None` | `None` | Called with (completed, total) |
+| `verbose` | `bool` | `True` | Show tqdm progress bar |
+| `**request_options` | | | Extra kwargs for `chat.completions.create()` |
+
+### `df.llm.cancel()`
+
+No parameters. Signals cancellation to all in-flight work.
