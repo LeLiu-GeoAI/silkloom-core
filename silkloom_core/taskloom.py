@@ -278,11 +278,12 @@ class PandasLLMAccessor:
         max_workers: int = 4,
         json_mode: bool = False,
         max_retries: int = 2,
+        join: bool = True,
         progress_callback: Callable[[int, int], None] | None = None,
         verbose: bool = True,
         **request_options: Any,
     ) -> pd.DataFrame:
-        """Run batch LLM extraction on every row and return a result DataFrame.
+        """Run batch LLM extraction on every row.
 
         Parameters
         ----------
@@ -303,6 +304,9 @@ class PandasLLMAccessor:
             If ``True``, sets ``response_format={"type": "json_object"}``.
         max_retries
             Number of retries on API errors (exponential backoff).
+        join
+            If ``True`` (default), return the original DataFrame with extracted
+            columns appended. If ``False``, return only the extracted columns.
         progress_callback
             ``callback(completed, total)`` called after each row finishes.
         verbose
@@ -313,9 +317,10 @@ class PandasLLMAccessor:
         Returns
         -------
         pd.DataFrame
-            One row per input row, same index. JSON object keys become
-            columns; non-object values go to ``_llm_raw``; errors go to
-            ``_llm_error``.
+            If *join* is True: the original DataFrame with extracted columns
+            appended. If False: only the extracted columns. Same index either way.
+            JSON object keys become columns; non-object values go to
+            ``_llm_raw``; errors go to ``_llm_error``.
 
         Raises
         ------
@@ -387,7 +392,10 @@ class PandasLLMAccessor:
                 if bar is not None:
                     bar.close()
 
-        return pd.DataFrame.from_dict(results, orient="index").reindex(self._obj.index)
+        result = pd.DataFrame.from_dict(results, orient="index").reindex(self._obj.index)
+        if join:
+            return self._obj.join(result)
+        return result
 
     def _process_row(
         self,

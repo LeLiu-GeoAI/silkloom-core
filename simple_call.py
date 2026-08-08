@@ -30,7 +30,7 @@ def main() -> None:
         max_workers=3,
     )
 
-    print(df.join(extracted))
+    print(extracted)
 
 
 if __name__ == "__main__":

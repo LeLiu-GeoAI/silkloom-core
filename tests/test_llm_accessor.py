@@ -373,3 +373,33 @@ def test_extract_client_overrides_setup(tmp_path):
     assert out.loc[0, "value"] == "per-call"
     assert len(setup_client.chat_impl.calls) == 0
     assert len(call_client.chat_impl.calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Join behavior
+# --------------------------------------------------------------------------- #
+
+def test_join_true_includes_original_columns(tmp_path):
+    client = FakeClient(['{"label":"positive"}'])
+    df = pd.DataFrame({"title": ["A"], "body": ["text"]})
+
+    out = df.llm.setup(client=client, cache_path=tmp_path / "cache.db").extract(
+        "{{ title }}", verbose=False
+    )
+
+    assert "title" in out.columns       # original
+    assert "body" in out.columns        # original
+    assert "label" in out.columns       # extracted
+
+
+def test_join_false_returns_only_extracted_columns(tmp_path):
+    client = FakeClient(['{"label":"positive"}'])
+    df = pd.DataFrame({"title": ["A"], "body": ["text"]})
+
+    out = df.llm.setup(client=client, cache_path=tmp_path / "cache.db").extract(
+        "{{ title }}", join=False, verbose=False
+    )
+
+    assert "title" not in out.columns
+    assert "body" not in out.columns
+    assert "label" in out.columns

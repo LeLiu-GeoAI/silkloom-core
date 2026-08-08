@@ -41,27 +41,24 @@ Importing `silkloom_core` registers the `df.llm` accessor on every DataFrame.
 ```python
 import pandas as pd
 import silkloom_core
-from openai import OpenAI
 
-silkloom_core.configure(
-    client=OpenAI(api_key="...", base_url="https://api.openai.com/v1"),
-    cache_path=".llm_cache.db",
-)
+silkloom_core.configure(api_key="...", base_url="https://api.openai.com/v1")
 
 df = pd.DataFrame({
     "title": ["A clear experiment", "A weak evaluation"],
     "abstract": ["Reliable and reproducible.", "Too small to conclude much."],
 })
 
-results = df.llm.extract(
+df = df.llm.extract(
     "Title: {{ title }}\nAbstract: {{ abstract }}\nReturn JSON with keys label and summary.",
     model="gpt-4o-mini",
     max_workers=8,
     json_mode=True,
 )
-
-df = df.join(results)
+# df now has: title, abstract, label, summary
 ```
+
+`extract()` returns the original DataFrame with extracted columns appended. Pass `join=False` if you only want the extracted columns.
 
 ## Configuration
 
@@ -75,7 +72,6 @@ Configure once at the start of a script — every DataFrame can call `extract()`
 silkloom_core.configure(
     api_key="...",
     base_url="https://api.openai.com/v1",
-    cache_path=".llm_cache.db",
 )
 
 # Or pass a pre-built client:
@@ -243,6 +239,7 @@ Same parameters as `configure()`. Returns `self` for chaining.
 | `max_workers` | `int` | `4` | Concurrent API call threads |
 | `json_mode` | `bool` | `False` | Set `response_format={"type":"json_object"}` |
 | `max_retries` | `int` | `2` | Retries on API error (exponential backoff) |
+| `join` | `bool` | `True` | If True, return original DataFrame with extracted columns appended; if False, return only extracted columns |
 | `progress_callback` | `Callable[[int, int], None] \| None` | `None` | Called with (completed, total) |
 | `verbose` | `bool` | `True` | Show tqdm progress bar |
 | `**request_options` | | | Extra kwargs for `chat.completions.create()` |
