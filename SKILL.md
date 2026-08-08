@@ -44,6 +44,57 @@ df.llm.extract("...", model="gpt-4o")
 df.llm.extract("...", model="glm-4-flash", client=zhipu_client)  # per-call override
 ```
 
+## Parameters
+
+All tuning is done via `extract()` keyword arguments — no separate config object.
+
+### `extract()` parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `prompt_template` | `str` | — | Jinja2 template (required) |
+| `client` | `Any` | `None` | Per-call client override |
+| `image_column` | `str` | `None` | Column with image paths/URLs |
+| `system_prompt` | `str` | `"Please output valid JSON only."` | System message; `None` to omit |
+| `model` | `str` | `"gpt-4o-mini"` | Model name |
+| `max_workers` | `int` | `4` | Concurrent API call threads |
+| `json_mode` | `bool` | `False` | Set `response_format={"type":"json_object"}` |
+| `max_retries` | `int` | `2` | Retries on API error (exponential backoff) |
+| `join` | `bool` | `True` | If True, return original DataFrame + extracted columns; False = extracted only |
+| `progress_callback` | `Callable` | `None` | Called with `(completed, total)` |
+| `verbose` | `bool` | `True` | Show tqdm progress bar |
+| `**request_options` | | | Extra kwargs forwarded to `chat.completions.create()` |
+
+### Concurrency
+
+```python
+# 16 concurrent threads — adjust to provider's rate limit
+df.llm.extract("{{ text }}", max_workers=16)
+
+# Sequential (debugging or strict rate limits)
+df.llm.extract("{{ text }}", max_workers=1)
+```
+
+Guideline: 4–8 for OpenAI default tier; 8–16 for high-volume providers. Lower the value if hitting `429`.
+
+### API parameters
+
+Any unrecognized kwarg is forwarded to `client.chat.completions.create()`:
+
+```python
+out = df.llm.extract(
+    "Classify {{ text }}",
+    model="gpt-4o-mini",
+    max_workers=8,
+    temperature=0.1,
+    max_tokens=200,
+    top_p=0.9,
+    seed=42,
+)
+```
+
+Common forwarded parameters: `temperature`, `max_tokens`, `top_p`, `frequency_penalty`, `presence_penalty`, `seed`, `stop`.
+
 ## Key points
 
 - **Auto-join**: `extract()` returns the original DataFrame with extracted columns appended. Pass `join=False` for results only.

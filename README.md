@@ -20,6 +20,7 @@ One call — `df.llm.extract(template)` — concurrently sends every row to an L
 - [Extraction](#extraction)
   - [Prompt Templates](#prompt-templates)
   - [Result Columns](#result-columns)
+- [Concurrency and Tuning](#concurrency-and-tuning)
 - [Cache and Audit](#cache-and-audit)
 - [Images](#images)
 - [Progress and Cancel](#progress-and-cancel)
@@ -148,6 +149,76 @@ The returned DataFrame has the same index as the input. Column semantics:
 | API call fails after all retries | `_llm_error` |
 
 Malformed JSON is repaired with [`json_repair`](https://github.com/mangiucugna/json_repair) before parsing.
+
+## Concurrency and Tuning
+
+All tuning parameters are passed directly to `extract()` — no separate config object needed.
+
+### Concurrency (`max_workers`)
+
+Controls the thread pool size for parallel API calls. Default is 4.
+
+```python
+# 16 concurrent threads — faster, but watch out for rate limits
+df.llm.extract("{{ text }}", max_workers=16)
+
+# Sequential — useful for debugging or strict rate-limit scenarios
+df.llm.extract("{{ text }}", max_workers=1)
+```
+
+**Guideline:** Set `max_workers` according to your provider's rate limit (RPM). For OpenAI's default tier, 4–8 is safe; for high-volume providers like DeepSeek, 8–16 works well. If you hit `429 Too Many Requests`, lower the value or increase `max_retries`.
+
+### Retries (`max_retries`)
+
+On API errors (timeouts, rate limits, server errors), the request is retried with exponential backoff (1s → 2s → 4s …). Default is 2 retries.
+
+```python
+# More resilient for flaky endpoints
+df.llm.extract("{{ text }}", max_retries=5)
+```
+
+### API Parameters (`**request_options`)
+
+Any keyword argument not recognized by `extract()` is forwarded directly to `client.chat.completions.create()`. Common ones:
+
+| Parameter | Type | Description |
+|---|---|---|
+| `temperature` | float | Sampling temperature (0–2). Lower = more deterministic. |
+| `max_tokens` | int | Maximum tokens to generate in the response. |
+| `top_p` | float | Nucleus sampling probability. |
+| `frequency_penalty` | float | Penalize repeated tokens (-2–2). |
+| `presence_penalty` | float | Penalize tokens already present (-2–2). |
+| `seed` | int | Random seed for reproducibility (provider-dependent). |
+| `stop` | str \| list[str] | Stop sequences. |
+
+```python
+out = df.llm.extract(
+    "Classify {{ text }} into positive/negative/neutral.",
+    model="gpt-4o-mini",
+    max_workers=8,
+    temperature=0.1,
+    max_tokens=200,
+    top_p=0.9,
+    seed=42,
+)
+```
+
+### Combined Example
+
+```python
+silkloom_core.configure(api_key="...", base_url="https://api.deepseek.com/v1")
+
+result = df.llm.extract(
+    "Analyze: {{ content }}\nReturn JSON with keys sentiment and confidence.",
+    model="deepseek-chat",
+    max_workers=12,        # 12 concurrent threads
+    max_retries=3,         # retry up to 3 times on failure
+    temperature=0.2,       # low temperature for consistent output
+    max_tokens=500,        # cap response length
+    json_mode=True,        # force JSON output
+    system_prompt="You are a sentiment analysis engine.",
+)
+```
 
 ## Cache and Audit
 
