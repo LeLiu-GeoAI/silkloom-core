@@ -295,7 +295,7 @@ def test_progress_callback_reports_completed_rows(tmp_path):
     )
 
     assert calls == [(1, 2), (2, 2)]
-    assert silkloom_core.__version__ == "7.1.0"
+    assert silkloom_core.__version__ == "7.2.0"
 
 
 # --------------------------------------------------------------------------- #
@@ -374,6 +374,107 @@ def test_extract_client_overrides_setup(tmp_path):
     assert out.loc[0, "value"] == "per-call"
     assert len(setup_client.chat_impl.calls) == 0
     assert len(call_client.chat_impl.calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Key rotation
+# --------------------------------------------------------------------------- #
+
+def test_configure_creates_rotating_client_from_pipe_keys(tmp_path):
+    """configure() with '|' in api_key should create a KeyRotatingClient."""
+    saved = _save_globals()
+    try:
+        silkloom_core.configure(
+            api_key="key1|key2|key3",
+            base_url="https://api.openai.com/v1",
+            cache_path=tmp_path / "cache.db",
+        )
+        import silkloom_core.taskloom as tl
+        client = tl._DEFAULT_CLIENT
+        assert isinstance(client, silkloom_core.KeyRotatingClient)
+        assert len(client) == 3
+    finally:
+        _restore_globals(saved)
+
+
+def test_configure_single_key_no_rotation(tmp_path):
+    """configure() with a single key (no '|') should NOT wrap in KeyRotatingClient."""
+    saved = _save_globals()
+    try:
+        silkloom_core.configure(
+            api_key="single-key",
+            base_url="https://api.openai.com/v1",
+            cache_path=tmp_path / "cache.db",
+        )
+        import silkloom_core.taskloom as tl
+        client = tl._DEFAULT_CLIENT
+        assert not isinstance(client, silkloom_core.KeyRotatingClient)
+    finally:
+        _restore_globals(saved)
+
+
+def test_key_rotation_dispatches_round_robin(tmp_path):
+    """With 3 keys, 3 consecutive calls should hit each client exactly once."""
+    c1 = FakeClient(['{"src":"c1"}'])
+    c2 = FakeClient(['{"src":"c2"}'])
+    c3 = FakeClient(['{"src":"c3"}'])
+    rotating = silkloom_core.KeyRotatingClient([c1, c2, c3])
+
+    saved = _save_globals()
+    try:
+        silkloom_core.configure(client=rotating, cache_path=tmp_path / "cache.db")
+        df = pd.DataFrame({"text": ["r0", "r1", "r2"]})
+        out = df.llm.extract("{{ text }}", max_workers=1, verbose=False)
+
+        assert list(out["src"]) == ["c1", "c2", "c3"]
+        assert len(c1.chat_impl.calls) == 1
+        assert len(c2.chat_impl.calls) == 1
+        assert len(c3.chat_impl.calls) == 1
+    finally:
+        _restore_globals(saved)
+
+
+def test_key_rotation_with_more_rows_than_keys(tmp_path):
+    """With 2 keys and 4 rows, each client should get 2 calls."""
+    c1 = FakeClient(['{"src":"c1"}'] * 4)
+    c2 = FakeClient(['{"src":"c2"}'] * 4)
+    rotating = silkloom_core.KeyRotatingClient([c1, c2])
+
+    saved = _save_globals()
+    try:
+        silkloom_core.configure(client=rotating, cache_path=tmp_path / "cache.db")
+        df = pd.DataFrame({"text": ["a", "b", "c", "d"]})
+        out = df.llm.extract("{{ text }}", max_workers=1, verbose=False)
+
+        assert len(c1.chat_impl.calls) == 2
+        assert len(c2.chat_impl.calls) == 2
+    finally:
+        _restore_globals(saved)
+
+
+def test_setup_with_pipe_keys_creates_rotation(tmp_path):
+    """setup() with '|' in api_key should also create a KeyRotatingClient."""
+    c1 = FakeClient(['{"src":"c1"}'])
+    c2 = FakeClient(['{"src":"c2"}'])
+
+    import silkloom_core.taskloom as tl
+    from unittest.mock import patch
+
+    created_clients = []
+    original_init = tl.OpenAI
+
+    def mock_openai(*args, **kwargs):
+        # Return FakeClient based on key order
+        idx = len(created_clients)
+        client = [c1, c2][idx]
+        created_clients.append(client)
+        return client
+
+    with patch.object(tl, "OpenAI", side_effect=mock_openai):
+        llm = pd.DataFrame({"text": ["x", "y"]}).llm
+        llm.setup(api_key="k1|k2", base_url="https://example.com", cache_path=tmp_path / "cache.db")
+        assert isinstance(llm._client, silkloom_core.KeyRotatingClient)
+        assert len(llm._client) == 2
 
 
 # --------------------------------------------------------------------------- #

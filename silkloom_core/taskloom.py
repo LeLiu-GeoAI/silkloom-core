@@ -19,6 +19,7 @@ from openai import OpenAI
 
 __all__ = [
     "DEFAULT_SYSTEM_PROMPT",
+    "KeyRotatingClient",
     "configure",
     "encode_image_to_base64",
     "image_to_data_url",
@@ -31,6 +32,74 @@ DEFAULT_MODEL = "gpt-4o-mini"
 
 _DEFAULT_CLIENT: Any | None = None
 _DEFAULT_CACHE_PATH: str | Path = ".llm_cache.db"
+
+
+class KeyRotatingClient:
+    """Round-robin wrapper over multiple OpenAI-compatible clients.
+
+    Each access of ``.chat`` returns the next client's ``chat`` namespace,
+    distributing API calls evenly across all keys. Thread-safe.
+
+    Usage with ``configure()`` (auto-split on ``|``)::
+
+        configure(api_key="key1|key2|key3", base_url="https://api.openai.com/v1")
+
+    Or build manually::
+
+        from silkloom_core import KeyRotatingClient
+        client = KeyRotatingClient([
+            OpenAI(api_key="key1", base_url="..."),
+            OpenAI(api_key="key2", base_url="..."),
+        ])
+        configure(client=client)
+    """
+
+    def __init__(self, clients: list[Any]):
+        if not clients:
+            raise ValueError("KeyRotatingClient requires at least one client")
+        self._clients = list(clients)
+        self._counter = 0
+        self._lock = threading.Lock()
+
+    def _next_client(self) -> Any:
+        with self._lock:
+            client = self._clients[self._counter % len(self._clients)]
+            self._counter += 1
+            return client
+
+    @property
+    def chat(self) -> Any:
+        """Return the next client's chat namespace (round-robin)."""
+        return self._next_client().chat
+
+    def __len__(self) -> int:
+        return len(self._clients)
+
+    def __repr__(self) -> str:
+        return f"KeyRotatingClient({len(self._clients)} clients)"
+
+
+def _build_client(
+    client: Any | None,
+    api_key: str | None,
+    base_url: str | None,
+    client_options: dict[str, Any],
+) -> Any:
+    """Create a client from *api_key*, auto-rotating when it contains ``|``."""
+    if client is not None:
+        return client
+    if api_key is None:
+        raise ValueError("api_key is required when client is not provided")
+
+    keys = [k.strip() for k in api_key.split("|") if k.strip()]
+    if not keys:
+        raise ValueError("api_key contains no valid keys after splitting on '|'")
+
+    if len(keys) == 1:
+        return OpenAI(api_key=keys[0], base_url=base_url, **client_options)
+
+    clients = [OpenAI(api_key=k, base_url=base_url, **client_options) for k in keys]
+    return KeyRotatingClient(clients)
 
 
 def configure(
@@ -53,6 +122,8 @@ def configure(
     ----------
     api_key, base_url
         Credentials for creating an :class:`openai.OpenAI` client.
+        If *api_key* contains ``|``, multiple keys are split and wrapped
+        in a :class:`KeyRotatingClient` for round-robin rotation.
     cache_path
         SQLite file path for the response cache.
     client
@@ -70,7 +141,7 @@ def configure(
             "configure() requires either client=... or api_key=..."
         )
     global _DEFAULT_CLIENT, _DEFAULT_CACHE_PATH
-    _DEFAULT_CLIENT = client or OpenAI(api_key=api_key, base_url=base_url, **client_options)
+    _DEFAULT_CLIENT = _build_client(client, api_key, base_url, client_options)
     _DEFAULT_CACHE_PATH = cache_path
 
 
@@ -253,8 +324,11 @@ class PandasLLMAccessor:
 
         The SQLite database is **not** created until the first ``extract()``
         call — ``setup()`` only stores the configuration.
+
+        If *api_key* contains ``|``, multiple keys are split and wrapped
+        in a :class:`KeyRotatingClient` for round-robin rotation.
         """
-        self._client = client or OpenAI(api_key=api_key, base_url=base_url, **client_options)
+        self._client = _build_client(client, api_key, base_url, client_options)
         self._cache_path = cache_path
         self._cache = None
         return self

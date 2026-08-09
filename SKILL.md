@@ -1,7 +1,7 @@
 ---
 name: silkloom-core
 description: Batch LLM extraction on pandas DataFrames. Use when the user wants to run LLM extraction, classification, or structured-data extraction across many rows of a DataFrame concurrently, with caching and JSON parsing.
-version: 7.1.0
+version: 7.2.0
 ---
 
 # SilkLoom Core
@@ -42,6 +42,26 @@ df = df.llm.extract(
 silkloom_core.configure(api_key="...", base_url="https://api.openai.com/v1")
 df.llm.extract("...", model="gpt-4o")
 df.llm.extract("...", model="glm-4-flash", client=zhipu_client)  # per-call override
+```
+
+### API key rotation
+
+Split multiple keys with `|` — each API call rotates to the next key round-robin:
+
+```python
+silkloom_core.configure(
+    api_key="key1|key2|key3",
+    base_url="https://api.openai.com/v1",
+)
+df.llm.extract("{{ text }}", max_workers=8)  # 8 threads, 3 keys → even distribution
+```
+
+Or build a `KeyRotatingClient` manually:
+
+```python
+from silkloom_core import KeyRotatingClient
+client = KeyRotatingClient([client1, client2, client3])
+silkloom_core.configure(client=client)
 ```
 
 ## Parameters
@@ -104,3 +124,4 @@ Common forwarded parameters: `temperature`, `max_tokens`, `top_p`, `frequency_pe
 - **Images**: Pass `image_column=` for local paths, HTTP(S) URLs, or `data:image/...` URLs.
 - **Cancel**: Call `df.llm.cancel()` from another thread to stop in-flight work.
 - **Client priority**: `extract(client=)` > `setup(client=)` > `configure(client=)` > error.
+- **Key rotation**: Split keys with `|` in `api_key` (or use `KeyRotatingClient`) for round-robin load balancing across API keys.

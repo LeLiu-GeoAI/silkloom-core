@@ -16,6 +16,7 @@ One call — `df.llm.extract(template)` — concurrently sends every row to an L
   - [Global Configuration](#global-configuration)
   - [Per-DataFrame Setup](#per-dataframe-setup)
   - [Per-Call Client](#per-call-client)
+  - [API Key Rotation](#api-key-rotation)
   - [Priority Chain](#priority-chain)
 - [Extraction](#extraction)
   - [Prompt Templates](#prompt-templates)
@@ -110,6 +111,44 @@ silkloom_core.configure(client=openai_client)
 df.llm.extract("...", model="gpt-4o")                          # → OpenAI
 df.llm.extract("...", model="glm-4-flash", client=zhipu_client) # → Zhipu
 ```
+
+### API Key Rotation
+
+When `api_key` contains `|`, the keys are split and wrapped in a `KeyRotatingClient` that distributes API calls round-robin across all keys — useful for staying under rate limits without manual load balancing:
+
+```python
+# 3 keys → each request goes to the next key in rotation
+silkloom_core.configure(
+    api_key="key1|key2|key3",
+    base_url="https://api.openai.com/v1",
+)
+
+df.llm.extract("{{ text }}", max_workers=8)  # 8 threads, 3 keys → ~2-3 calls per key
+```
+
+Works with `setup()` too:
+
+```python
+df.llm.setup(
+    api_key="key1|key2|key3",
+    base_url="https://api.openai.com/v1",
+).extract("{{ text }}")
+```
+
+You can also build a `KeyRotatingClient` manually — for example, to mix keys from different providers:
+
+```python
+from openai import OpenAI
+from silkloom_core import KeyRotatingClient
+
+client = KeyRotatingClient([
+    OpenAI(api_key="openai-key", base_url="https://api.openai.com/v1"),
+    OpenAI(api_key="deepseek-key", base_url="https://api.deepseek.com/v1"),
+])
+silkloom_core.configure(client=client)
+```
+
+> **Tip:** Combine key rotation with `max_workers` to parallelize across keys. With 3 keys and `max_workers=9`, each key handles ~3 concurrent requests.
 
 ### Priority Chain
 
@@ -288,7 +327,7 @@ Queued work is cancelled where possible. Running rows stop before their next ret
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `api_key` | `str \| None` | `None` | API key for OpenAI client |
+| `api_key` | `str \| None` | `None` | API key. If contains `\|`, split into multiple keys for round-robin rotation |
 | `base_url` | `str \| None` | `None` | API base URL |
 | `cache_path` | `str \| Path` | `".llm_cache.db"` | SQLite cache file path |
 | `client` | `Any \| None` | `None` | Pre-built client (overrides api_key/base_url) |
@@ -318,3 +357,22 @@ Same parameters as `configure()`. Returns `self` for chaining.
 ### `df.llm.cancel()`
 
 No parameters. Signals cancellation to all in-flight work.
+
+### `silkloom_core.KeyRotatingClient(clients)`
+
+Wraps multiple OpenAI-compatible clients and rotates through them round-robin. Thread-safe.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `clients` | `list[Any]` | List of OpenAI-compatible client instances |
+
+```python
+from silkloom_core import KeyRotatingClient
+from openai import OpenAI
+
+client = KeyRotatingClient([
+    OpenAI(api_key="key1", base_url="https://api.openai.com/v1"),
+    OpenAI(api_key="key2", base_url="https://api.openai.com/v1"),
+])
+silkloom_core.configure(client=client)
+```
